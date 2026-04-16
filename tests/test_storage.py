@@ -105,6 +105,17 @@ def test_in_memory_entity_repository_upserts_by_id() -> None:
     assert repository.list_all() == [updated]
 
 
+def test_in_memory_entity_repository_save_if_absent_is_insert_only() -> None:
+    repository = InMemoryEntityRepository()
+    original = make_entity()
+    updated = original.model_copy(update={"display_name": "Updated"})
+
+    assert repository.save_if_absent(original) is True
+    assert repository.save_if_absent(updated) is False
+
+    assert repository.list_all() == [original]
+
+
 def test_alias_repository_protocol_is_usable_for_in_memory() -> None:
     repository: AliasRepository = InMemoryAliasRepository()
 
@@ -163,6 +174,30 @@ def test_in_memory_alias_repository_does_not_duplicate_same_alias() -> None:
 
     assert repository.find_by_text("CATL") == [alias]
     assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [alias]
+
+
+def test_in_memory_alias_repository_rejects_semantic_duplicate_alias() -> None:
+    repository = InMemoryAliasRepository()
+    first = make_alias()
+    second = make_alias()
+
+    assert repository.save_if_absent(first) is True
+    assert repository.save_if_absent(second) is False
+
+    assert repository.find_by_text("CATL") == [first]
+    assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [first]
+
+
+def test_in_memory_alias_repository_batch_save_if_absent_returns_created_count() -> None:
+    repository = InMemoryAliasRepository()
+    first = make_alias(alias_text="CATL")
+    duplicate = make_alias(alias_text="CATL")
+    code = make_alias(alias_text="300750")
+
+    assert repository.save_batch_if_absent([first, duplicate, code]) == 2
+    assert repository.save_batch_if_absent([first, code]) == 0
+
+    assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [first, code]
 
 
 def test_reference_repository_protocol_is_usable_for_in_memory() -> None:
