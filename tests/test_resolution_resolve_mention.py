@@ -272,10 +272,11 @@ def test_public_resolve_mention_uses_configured_default_repositories() -> None:
     assert references[0].source_context["source_type"] == "announcement"
 
 
-def test_resolved_case_write_failure_rolls_back_reference() -> None:
-    entity_repo, alias_repo, reference_repo, _case_repo = (
+def test_resolved_case_write_failure_preserves_reference_retry_outbox() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
+    reference_repo = DeleteForbiddenReferenceRepository()
 
     with pytest.raises(RuntimeError, match="case write failed"):
         resolve_mention_with_repositories(
@@ -287,14 +288,23 @@ def test_resolved_case_write_failure_rolls_back_reference() -> None:
             case_repo=FailingResolutionCaseRepository(),
         )
 
-    assert saved_references(reference_repo) == []
-    assert reference_repo.find_unresolved() == []
+    references = saved_references(reference_repo)
+    assert len(references) == 1
+    assert reference_repo.delete_calls == 0
+    assert references[0].resolved_entity_id == "ENT_STOCK_600519.SH"
+    retry = references[0].source_context["resolution_audit_outbox"]
+    assert retry["status"] == "resolution_case_write_failed"
+    assert retry["case"]["reference_id"] == references[0].reference_id
+    assert retry["case"]["selected_entity_id"] == "ENT_STOCK_600519.SH"
+    assert retry["error_type"] == "RuntimeError"
+    assert retry["error_message"] == "case write failed"
 
 
-def test_unresolved_case_write_failure_rolls_back_reference() -> None:
-    entity_repo, alias_repo, reference_repo, _case_repo = (
+def test_unresolved_case_write_failure_preserves_reference_retry_outbox() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
+    reference_repo = DeleteForbiddenReferenceRepository()
 
     with pytest.raises(RuntimeError, match="case write failed"):
         resolve_mention_with_repositories(
@@ -306,8 +316,38 @@ def test_unresolved_case_write_failure_rolls_back_reference() -> None:
             case_repo=FailingResolutionCaseRepository(),
         )
 
-    assert saved_references(reference_repo) == []
-    assert reference_repo.find_unresolved() == []
+    references = saved_references(reference_repo)
+    unresolved = reference_repo.find_unresolved()
+    assert len(references) == 1
+    assert unresolved == references
+    assert reference_repo.delete_calls == 0
+    retry = references[0].source_context["resolution_audit_outbox"]
+    assert retry["status"] == "resolution_case_write_failed"
+    assert retry["case"]["reference_id"] == references[0].reference_id
+    assert retry["case"]["selected_entity_id"] is None
+    assert retry["error_type"] == "RuntimeError"
+
+
+def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    reference_repo = NativeResolutionAuditReferenceRepository()
+
+    result = resolve_mention_with_repositories(
+        "贵州茅台",
+        None,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        reference_repo=reference_repo,
+        case_repo=UnexpectedResolutionCaseRepository(),
+    )
+
+    references = saved_references(reference_repo)
+    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert len(references) == 1
+    assert len(reference_repo.saved_cases) == 1
+    assert reference_repo.saved_cases[0].reference_id == references[0].reference_id
 
 
 def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
@@ -372,3 +412,32 @@ class FlappingAliasRepository:
 class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
     def save(self, case: entity_registry.ResolutionCase) -> None:
         raise RuntimeError("case write failed")
+
+
+class UnexpectedResolutionCaseRepository(InMemoryResolutionCaseRepository):
+    def save(self, case: entity_registry.ResolutionCase) -> None:
+        raise AssertionError("native audit unit of work should save cases")
+
+
+class DeleteForbiddenReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.delete_calls = 0
+
+    def delete(self, reference_id: str) -> None:
+        self.delete_calls += 1
+        raise AssertionError("resolution audit must not delete references")
+
+
+class NativeResolutionAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved_cases: list[entity_registry.ResolutionCase] = []
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.save(reference)
+        self.saved_cases.append(case)

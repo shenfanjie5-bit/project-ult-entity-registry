@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 from entity_registry.aliases import AliasManager, normalize_alias_text
 from entity_registry.core import (
     AliasType,
@@ -32,6 +34,72 @@ from entity_registry.storage import (
     ReferenceRepository,
     ResolutionCaseRepository,
 )
+
+
+class ResolutionAuditRepository(Protocol):
+    """Unit-of-work contract for writing resolution audit records."""
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None: ...
+
+
+class _RepositoryResolutionAuditRepository:
+    """Resolution audit unit of work over existing repository contracts."""
+
+    def __init__(
+        self,
+        reference_repo: ReferenceRepository,
+        case_repo: ResolutionCaseRepository,
+    ) -> None:
+        self._reference_repo = reference_repo
+        self._case_repo = case_repo
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        native_save_resolution = getattr(
+            self._reference_repo,
+            "save_resolution",
+            None,
+        )
+        if callable(native_save_resolution):
+            native_save_resolution(reference, case)
+            return
+
+        self._reference_repo.save(reference)
+        try:
+            record_resolution_case(case, self._case_repo)
+        except Exception as error:
+            self._record_case_retry(reference, case, error)
+            raise
+
+    def _record_case_retry(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+        error: Exception,
+    ) -> None:
+        retry_reference = reference.model_copy(
+            update={
+                "source_context": _source_context_with_case_retry(
+                    reference.source_context,
+                    case,
+                    error,
+                )
+            }
+        )
+        try:
+            self._reference_repo.save(retry_reference)
+        except Exception as retry_error:
+            error.add_note(
+                "failed to record resolution case retry payload: "
+                f"{type(retry_error).__name__}: {retry_error}"
+            )
 
 
 class DeterministicMatcher:
@@ -283,12 +351,23 @@ def _save_resolution_audit(
     reference_repo: ReferenceRepository,
     case_repo: ResolutionCaseRepository,
 ) -> None:
-    reference_repo.save(reference)
-    try:
-        record_resolution_case(case, case_repo)
-    except Exception:
-        reference_repo.delete(reference.reference_id)
-        raise
+    audit_repo = _RepositoryResolutionAuditRepository(reference_repo, case_repo)
+    audit_repo.save_resolution(reference, case)
+
+
+def _source_context_with_case_retry(
+    source_context: dict,
+    case: ResolutionCase,
+    error: Exception,
+) -> dict:
+    updated_context = dict(source_context)
+    updated_context["resolution_audit_outbox"] = {
+        "status": "resolution_case_write_failed",
+        "case": case.model_dump(mode="json"),
+        "error_type": type(error).__name__,
+        "error_message": str(error),
+    }
+    return updated_context
 
 
 def _source_context_from(
@@ -305,6 +384,7 @@ def _source_context_from(
 
 __all__ = [
     "DeterministicMatcher",
+    "ResolutionAuditRepository",
     "resolve_mention",
     "resolve_mention_with_repositories",
 ]
