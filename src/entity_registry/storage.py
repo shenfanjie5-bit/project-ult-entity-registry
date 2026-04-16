@@ -6,7 +6,7 @@ from threading import RLock
 from typing import Protocol
 
 from entity_registry.core import CanonicalEntity, EntityAlias
-from entity_registry.references import EntityReference
+from entity_registry.references import EntityReference, ResolutionCase
 
 
 class EntityRepository(Protocol):
@@ -44,9 +44,21 @@ class ReferenceRepository(Protocol):
 
     def save(self, ref: EntityReference) -> None: ...
 
+    def delete(self, reference_id: str) -> None: ...
+
     def get(self, reference_id: str) -> EntityReference | None: ...
 
     def find_unresolved(self) -> list[EntityReference]: ...
+
+
+class ResolutionCaseRepository(Protocol):
+    """Storage contract for resolution audit cases."""
+
+    def save(self, case: ResolutionCase) -> None: ...
+
+    def get(self, case_id: str) -> ResolutionCase | None: ...
+
+    def find_by_reference(self, reference_id: str) -> list[ResolutionCase]: ...
 
 
 class InMemoryEntityRepository:
@@ -143,6 +155,9 @@ class InMemoryReferenceRepository:
     def save(self, ref: EntityReference) -> None:
         self._references[ref.reference_id] = ref
 
+    def delete(self, reference_id: str) -> None:
+        self._references.pop(reference_id, None)
+
     def get(self, reference_id: str) -> EntityReference | None:
         return self._references.get(reference_id)
 
@@ -151,6 +166,26 @@ class InMemoryReferenceRepository:
             ref
             for ref in self._references.values()
             if ref.resolved_entity_id is None
+        ]
+
+
+class InMemoryResolutionCaseRepository:
+    """Dictionary-backed resolution case repository for tests and local workflows."""
+
+    def __init__(self) -> None:
+        self._cases: dict[str, ResolutionCase] = {}
+
+    def save(self, case: ResolutionCase) -> None:
+        self._cases[case.case_id] = case
+
+    def get(self, case_id: str) -> ResolutionCase | None:
+        return self._cases.get(case_id)
+
+    def find_by_reference(self, reference_id: str) -> list[ResolutionCase]:
+        return [
+            case
+            for case in self._cases.values()
+            if case.reference_id == reference_id
         ]
 
 

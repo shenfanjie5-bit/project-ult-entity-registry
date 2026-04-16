@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from entity_registry.core import FinalStatus, ResolutionMethod
 
@@ -30,6 +30,36 @@ class ResolutionContext(BaseModel):
     document_context: str
     source_type: str
     timestamp: datetime = Field(default_factory=_utcnow)
+
+
+class MentionResolutionResult(BaseModel):
+    """Stable public result shape for mention resolution."""
+
+    raw_mention_text: str
+    resolved_entity_id: str | None
+    resolution_method: ResolutionMethod
+    resolution_confidence: float | None
+
+    @model_validator(mode="after")
+    def validate_unresolved_result(self) -> MentionResolutionResult:
+        if (
+            self.resolved_entity_id is None
+            and self.resolution_method is not ResolutionMethod.UNRESOLVED
+        ):
+            raise ValueError(
+                "resolved_entity_id=None requires resolution_method='unresolved'"
+            )
+        if (
+            self.resolution_method is ResolutionMethod.UNRESOLVED
+            and self.resolved_entity_id is not None
+        ):
+            raise ValueError("unresolved results must not carry a resolved entity")
+        if (
+            self.resolution_method is ResolutionMethod.UNRESOLVED
+            and self.resolution_confidence is not None
+        ):
+            raise ValueError("unresolved results must not carry confidence")
+        return self
 
 
 class ResolutionDecision(BaseModel):
