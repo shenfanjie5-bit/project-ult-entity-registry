@@ -20,7 +20,6 @@ from entity_registry.references import (
     ResolutionCase,
     _new_case_id,
     _new_reference_id,
-    record_resolution_case,
 )
 from entity_registry.resolution_types import (
     MentionCandidateSet,
@@ -46,8 +45,12 @@ class ResolutionAuditRepository(Protocol):
     ) -> None: ...
 
 
+class ResolutionAuditRepositoryRequiredError(RuntimeError):
+    """Raised when resolution is asked to write audit records without a UoW."""
+
+
 class _RepositoryResolutionAuditRepository:
-    """Resolution audit unit of work over existing repository contracts."""
+    """Resolution audit unit of work over native repository contracts."""
 
     def __init__(
         self,
@@ -71,35 +74,10 @@ class _RepositoryResolutionAuditRepository:
             native_save_resolution(reference, case)
             return
 
-        self._reference_repo.save(reference)
-        try:
-            record_resolution_case(case, self._case_repo)
-        except Exception as error:
-            self._record_case_retry(reference, case, error)
-            raise
-
-    def _record_case_retry(
-        self,
-        reference: EntityReference,
-        case: ResolutionCase,
-        error: Exception,
-    ) -> None:
-        retry_reference = reference.model_copy(
-            update={
-                "source_context": _source_context_with_case_retry(
-                    reference.source_context,
-                    case,
-                    error,
-                )
-            }
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit writes require a native save_resolution(reference, case) "
+            "unit of work; separate reference/case writes are not supported",
         )
-        try:
-            self._reference_repo.save(retry_reference)
-        except Exception as retry_error:
-            error.add_note(
-                "failed to record resolution case retry payload: "
-                f"{type(retry_error).__name__}: {retry_error}"
-            )
 
 
 class DeterministicMatcher:
@@ -355,21 +333,6 @@ def _save_resolution_audit(
     audit_repo.save_resolution(reference, case)
 
 
-def _source_context_with_case_retry(
-    source_context: dict,
-    case: ResolutionCase,
-    error: Exception,
-) -> dict:
-    updated_context = dict(source_context)
-    updated_context["resolution_audit_outbox"] = {
-        "status": "resolution_case_write_failed",
-        "case": case.model_dump(mode="json"),
-        "error_type": type(error).__name__,
-        "error_message": str(error),
-    }
-    return updated_context
-
-
 def _source_context_from(
     context: ResolutionContext | dict[str, object] | None,
 ) -> dict:
@@ -385,6 +348,7 @@ def _source_context_from(
 __all__ = [
     "DeterministicMatcher",
     "ResolutionAuditRepository",
+    "ResolutionAuditRepositoryRequiredError",
     "resolve_mention",
     "resolve_mention_with_repositories",
 ]
