@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -16,6 +17,7 @@ from pydantic import BaseModel, field_validator
 from entity_registry.aliases import AliasManager, generate_aliases_from_stock_basic
 from entity_registry.core import (
     CanonicalEntity,
+    EntityAlias,
     EntityStatus,
     EntityType,
     generate_stock_entity_id,
@@ -23,8 +25,6 @@ from entity_registry.core import (
 from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
-    InMemoryAliasRepository,
-    InMemoryEntityRepository,
 )
 
 
@@ -75,9 +75,16 @@ class InitializationResult(BaseModel):
 class InitializationError(RuntimeError):
     """Raised when initialization finishes with row-level errors."""
 
-    def __init__(self, errors: list[str]) -> None:
-        self.errors = errors
-        super().__init__("stock_basic initialization failed: " + "; ".join(errors))
+    def __init__(self, result: InitializationResult) -> None:
+        self.result = result
+        self.errors = result.errors
+        super().__init__(
+            "stock_basic initialization failed: " + "; ".join(result.errors),
+        )
+
+
+class RepositoryNotConfiguredError(RuntimeError):
+    """Raised when the public API is used before repositories are configured."""
 
 
 class StockBasicSnapshotReader(Protocol):
@@ -169,8 +176,59 @@ def detect_cross_listing_groups(records: list[StockBasicRecord]) -> dict[str, st
     return groups
 
 
-_DEFAULT_ENTITY_REPOSITORY = InMemoryEntityRepository()
-_DEFAULT_ALIAS_REPOSITORY = InMemoryAliasRepository()
+_DEFAULT_ENTITY_REPOSITORY: EntityRepository | None = None
+_DEFAULT_ALIAS_REPOSITORY: AliasRepository | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedInitialization:
+    entities: tuple[CanonicalEntity, ...]
+    aliases: tuple[EntityAlias, ...]
+    cross_listing_groups: int
+    errors: tuple[str, ...]
+
+
+def configure_default_repositories(
+    entity_repo: EntityRepository,
+    alias_repo: AliasRepository,
+) -> None:
+    """Configure repositories used by public package-level APIs."""
+
+    global _DEFAULT_ENTITY_REPOSITORY, _DEFAULT_ALIAS_REPOSITORY
+    _DEFAULT_ENTITY_REPOSITORY = entity_repo
+    _DEFAULT_ALIAS_REPOSITORY = alias_repo
+
+
+def reset_default_repositories() -> None:
+    """Clear configured repositories for test isolation and fail-fast defaults."""
+
+    global _DEFAULT_ENTITY_REPOSITORY, _DEFAULT_ALIAS_REPOSITORY
+    _DEFAULT_ENTITY_REPOSITORY = None
+    _DEFAULT_ALIAS_REPOSITORY = None
+
+
+def get_default_entity_repository() -> EntityRepository:
+    """Return the configured default entity repository."""
+
+    if _DEFAULT_ENTITY_REPOSITORY is None:
+        raise RepositoryNotConfiguredError(
+            "entity-registry repositories are not configured; "
+            "call configure_default_repositories() before using public initialization "
+            "or lookup APIs",
+        )
+    return _DEFAULT_ENTITY_REPOSITORY
+
+
+def get_default_alias_repository() -> AliasRepository:
+    """Return the configured default alias repository."""
+
+    if _DEFAULT_ALIAS_REPOSITORY is None:
+        raise RepositoryNotConfiguredError(
+            "entity-registry repositories are not configured; "
+            "call configure_default_repositories() before using public initialization "
+            "or lookup APIs",
+        )
+    return _DEFAULT_ALIAS_REPOSITORY
 
 
 def initialize_from_stock_basic(snapshot_ref: str) -> None:
@@ -178,12 +236,12 @@ def initialize_from_stock_basic(snapshot_ref: str) -> None:
 
     result = initialize_from_stock_basic_into(
         snapshot_ref,
-        _DEFAULT_ENTITY_REPOSITORY,
-        _DEFAULT_ALIAS_REPOSITORY,
+        get_default_entity_repository(),
+        get_default_alias_repository(),
         stock_basic_reader=_default_reader_for_snapshot(snapshot_ref),
     )
     if result.errors:
-        raise InitializationError(result.errors)
+        raise InitializationError(result)
 
 
 def initialize_from_stock_basic_into(
@@ -199,39 +257,66 @@ def initialize_from_stock_basic_into(
         if stock_basic_reader is None
         else stock_basic_reader
     )
-    records = reader.read(snapshot_ref)
-    cross_listing_groups = detect_cross_listing_groups(records)
+    prepared = _prepare_initialization_records(reader.read(snapshot_ref))
+    if prepared.errors:
+        return InitializationResult(
+            entities_created=0,
+            aliases_created=0,
+            cross_listing_groups=prepared.cross_listing_groups,
+            errors=list(prepared.errors),
+        )
+
     alias_manager = AliasManager(alias_repo)
     entities_created = 0
-    aliases_created = 0
+    for entity in prepared.entities:
+        if entity_repo.save_if_absent(entity):
+            entities_created += 1
+
+    aliases_created = alias_manager.add_aliases_batch(list(prepared.aliases))
+
+    return InitializationResult(
+        entities_created=entities_created,
+        aliases_created=aliases_created,
+        cross_listing_groups=prepared.cross_listing_groups,
+        errors=[],
+    )
+
+
+def _prepare_initialization_records(
+    records: list[StockBasicRecord],
+) -> _PreparedInitialization:
+    cross_listing_groups = detect_cross_listing_groups(records)
+    entities: list[CanonicalEntity] = []
+    aliases: list[EntityAlias] = []
     errors: list[str] = []
 
     for record in records:
         try:
             canonical_entity_id = generate_stock_entity_id(record.ts_code)
-            if entity_repo.save_if_absent(
-                CanonicalEntity(
-                    canonical_entity_id=canonical_entity_id,
-                    entity_type=EntityType.STOCK,
-                    display_name=record.name,
-                    status=_entity_status_from_list_status(record.list_status),
-                    anchor_code=record.ts_code,
-                    cross_listing_group=cross_listing_groups.get(record.ts_code),
-                )
-            ):
-                entities_created += 1
-
-            aliases_created += alias_manager.add_aliases_batch(
-                generate_aliases_from_stock_basic(record, canonical_entity_id)
+            entity = CanonicalEntity(
+                canonical_entity_id=canonical_entity_id,
+                entity_type=EntityType.STOCK,
+                display_name=record.name,
+                status=_entity_status_from_list_status(record.list_status),
+                anchor_code=record.ts_code,
+                cross_listing_group=cross_listing_groups.get(record.ts_code),
+            )
+            record_aliases = generate_aliases_from_stock_basic(
+                record,
+                canonical_entity_id,
             )
         except ValueError as exc:
             errors.append(f"{record.ts_code}: {exc}")
+            continue
 
-    return InitializationResult(
-        entities_created=entities_created,
-        aliases_created=aliases_created,
+        entities.append(entity)
+        aliases.extend(record_aliases)
+
+    return _PreparedInitialization(
+        entities=tuple(() if errors else entities),
+        aliases=tuple(() if errors else aliases),
         cross_listing_groups=len(set(cross_listing_groups.values())),
-        errors=errors,
+        errors=tuple(errors),
     )
 
 

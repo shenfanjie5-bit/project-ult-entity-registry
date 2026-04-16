@@ -1,5 +1,6 @@
-import json
 import inspect
+import json
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,7 @@ from entity_registry.init import (
     FileStockBasicSnapshotReader,
     InitializationError,
     InitializationResult,
+    RepositoryNotConfiguredError,
     StockBasicRecord,
     detect_cross_listing_groups,
     initialize_from_stock_basic,
@@ -24,6 +26,13 @@ from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepos
 
 
 FIXTURE_PATH = Path("tests/fixtures/stock_basic_sample.json")
+
+
+@pytest.fixture(autouse=True)
+def reset_public_repositories() -> Iterator[None]:
+    entity_registry.reset_default_repositories()
+    yield
+    entity_registry.reset_default_repositories()
 
 
 def initialize_from_fixture(
@@ -81,22 +90,46 @@ def test_public_initialize_from_stock_basic_matches_project_contract() -> None:
     )
 
 
+def test_public_initialize_from_stock_basic_fails_fast_without_repositories() -> None:
+    with pytest.raises(RepositoryNotConfiguredError, match="not configured"):
+        initialize_from_stock_basic(str(FIXTURE_PATH))
+
+
 def test_public_initialize_from_stock_basic_returns_none_for_fixture_snapshot() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(entity_repo, alias_repo)
+
     result = initialize_from_stock_basic(str(FIXTURE_PATH))
 
     assert result is None
+    entity = entity_registry.lookup_alias("平安银行")
+    assert entity is not None
+    assert entity.canonical_entity_id == "ENT_STOCK_000001.SZ"
+    assert entity_repo.get("ENT_STOCK_000001.SZ") == entity
+    assert alias_repo.find_by_entity("ENT_STOCK_000001.SZ")
 
 
 def test_public_initialize_from_stock_basic_raises_on_row_errors(tmp_path: Path) -> None:
     snapshot = tmp_path / "bad-id.json"
-    payload = make_minimal_record_payload(ts_code="300750 SZ")
-    snapshot.write_text(json.dumps([payload]), encoding="utf-8")
+    valid_payload = make_minimal_record_payload(
+        ts_code="688019.SH",
+        symbol="688019",
+        name="安集科技",
+    )
+    invalid_payload = make_minimal_record_payload(ts_code="300750 SZ")
+    snapshot.write_text(json.dumps([valid_payload, invalid_payload]), encoding="utf-8")
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(entity_repo, alias_repo)
 
     with pytest.raises(InitializationError) as exc_info:
         initialize_from_stock_basic(str(snapshot))
 
     assert exc_info.value.errors
     assert "300750 SZ" in str(exc_info.value)
+    assert entity_repo.list_all() == []
+    assert alias_repo.find_by_text("安集科技") == []
 
 
 def test_load_stock_basic_records_from_json_fixture() -> None:
@@ -448,19 +481,28 @@ def test_initialize_from_stock_basic_empty_snapshot_returns_zero_counts(tmp_path
 
 def test_initialize_from_stock_basic_reports_invalid_entity_id(tmp_path: Path) -> None:
     snapshot = tmp_path / "bad-id.json"
-    payload = make_minimal_record_payload(ts_code="300750 SZ")
-    snapshot.write_text(json.dumps([payload]), encoding="utf-8")
+    valid_payload = make_minimal_record_payload(
+        ts_code="688019.SH",
+        symbol="688019",
+        name="安集科技",
+    )
+    invalid_payload = make_minimal_record_payload(ts_code="300750 SZ")
+    snapshot.write_text(json.dumps([valid_payload, invalid_payload]), encoding="utf-8")
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
 
     result = initialize_from_stock_basic_into(
         str(snapshot),
-        InMemoryEntityRepository(),
-        InMemoryAliasRepository(),
+        entity_repo,
+        alias_repo,
         stock_basic_reader=FileStockBasicSnapshotReader(),
     )
 
     assert result.entities_created == 0
     assert result.aliases_created == 0
     assert result.errors
+    assert entity_repo.list_all() == []
+    assert alias_repo.find_by_text("安集科技") == []
 
 
 def make_minimal_record_payload(**overrides: object) -> dict[str, object]:
