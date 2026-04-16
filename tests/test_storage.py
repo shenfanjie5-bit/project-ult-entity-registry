@@ -1,0 +1,209 @@
+from entity_registry.core import (
+    AliasType,
+    CanonicalEntity,
+    EntityAlias,
+    EntityStatus,
+    EntityType,
+    ResolutionMethod,
+)
+from entity_registry.references import EntityReference
+from entity_registry.storage import (
+    AliasRepository,
+    EntityRepository,
+    InMemoryAliasRepository,
+    InMemoryEntityRepository,
+    InMemoryReferenceRepository,
+    ReferenceRepository,
+)
+
+
+def make_entity(entity_id: str = "ENT_STOCK_300750.SZ") -> CanonicalEntity:
+    return CanonicalEntity(
+        canonical_entity_id=entity_id,
+        entity_type=EntityType.STOCK,
+        display_name="CATL",
+        status=EntityStatus.ACTIVE,
+        anchor_code=entity_id.removeprefix("ENT_STOCK_"),
+        cross_listing_group=None,
+    )
+
+
+def make_alias(
+    entity_id: str = "ENT_STOCK_300750.SZ",
+    alias_text: str = "CATL",
+) -> EntityAlias:
+    return EntityAlias(
+        canonical_entity_id=entity_id,
+        alias_text=alias_text,
+        alias_type=AliasType.SHORT_NAME,
+        confidence=1.0,
+        source="unit-test",
+        is_primary=True,
+    )
+
+
+def make_reference(
+    reference_id: str,
+    resolved_entity_id: str | None,
+) -> EntityReference:
+    return EntityReference(
+        reference_id=reference_id,
+        raw_mention_text="CATL" if resolved_entity_id else "Unknown Corp",
+        source_context={"source": "unit-test"},
+        resolved_entity_id=resolved_entity_id,
+        resolution_method=(
+            ResolutionMethod.DETERMINISTIC
+            if resolved_entity_id
+            else ResolutionMethod.UNRESOLVED
+        ),
+        resolution_confidence=1.0 if resolved_entity_id else None,
+    )
+
+
+def test_entity_repository_protocol_is_usable_for_in_memory() -> None:
+    repository: EntityRepository = InMemoryEntityRepository()
+
+    assert repository.list_all() == []
+
+
+def test_in_memory_entity_repository_saves_and_gets_entity() -> None:
+    repository = InMemoryEntityRepository()
+    entity = make_entity()
+
+    repository.save(entity)
+
+    assert repository.get("ENT_STOCK_300750.SZ") == entity
+    assert repository.exists("ENT_STOCK_300750.SZ") is True
+
+
+def test_in_memory_entity_repository_returns_none_for_missing_entity() -> None:
+    repository = InMemoryEntityRepository()
+
+    assert repository.get("ENT_STOCK_MISSING.SZ") is None
+    assert repository.exists("ENT_STOCK_MISSING.SZ") is False
+
+
+def test_in_memory_entity_repository_lists_all_entities() -> None:
+    repository = InMemoryEntityRepository()
+    first = make_entity("ENT_STOCK_300750.SZ")
+    second = make_entity("ENT_STOCK_06888.HK")
+
+    repository.save(first)
+    repository.save(second)
+
+    assert repository.list_all() == [first, second]
+
+
+def test_in_memory_entity_repository_upserts_by_id() -> None:
+    repository = InMemoryEntityRepository()
+    original = make_entity()
+    updated = original.model_copy(update={"display_name": "Updated"})
+
+    repository.save(original)
+    repository.save(updated)
+
+    assert repository.list_all() == [updated]
+
+
+def test_alias_repository_protocol_is_usable_for_in_memory() -> None:
+    repository: AliasRepository = InMemoryAliasRepository()
+
+    assert repository.find_by_text("missing") == []
+
+
+def test_in_memory_alias_repository_finds_by_text() -> None:
+    repository = InMemoryAliasRepository()
+    alias = make_alias()
+
+    repository.save(alias)
+
+    assert repository.find_by_text("CATL") == [alias]
+
+
+def test_in_memory_alias_repository_finds_by_entity() -> None:
+    repository = InMemoryAliasRepository()
+    alias = make_alias()
+
+    repository.save(alias)
+
+    assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [alias]
+
+
+def test_in_memory_alias_repository_returns_empty_lists_for_missing_keys() -> None:
+    repository = InMemoryAliasRepository()
+
+    assert repository.find_by_text("missing") == []
+    assert repository.find_by_entity("ENT_STOCK_MISSING.SZ") == []
+
+
+def test_in_memory_alias_repository_supports_batch_save() -> None:
+    repository = InMemoryAliasRepository()
+    short_name = make_alias(alias_text="CATL")
+    code = EntityAlias(
+        canonical_entity_id="ENT_STOCK_300750.SZ",
+        alias_text="300750.SZ",
+        alias_type=AliasType.CODE,
+        confidence=1.0,
+        source="unit-test",
+        is_primary=False,
+    )
+
+    repository.save_batch([short_name, code])
+
+    assert repository.find_by_text("300750.SZ") == [code]
+    assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [short_name, code]
+
+
+def test_in_memory_alias_repository_does_not_duplicate_same_alias() -> None:
+    repository = InMemoryAliasRepository()
+    alias = make_alias()
+
+    repository.save(alias)
+    repository.save(alias)
+
+    assert repository.find_by_text("CATL") == [alias]
+    assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [alias]
+
+
+def test_reference_repository_protocol_is_usable_for_in_memory() -> None:
+    repository: ReferenceRepository = InMemoryReferenceRepository()
+
+    assert repository.find_unresolved() == []
+
+
+def test_in_memory_reference_repository_saves_and_gets_reference() -> None:
+    repository = InMemoryReferenceRepository()
+    reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+
+    repository.save(reference)
+
+    assert repository.get("ref-1") == reference
+
+
+def test_in_memory_reference_repository_returns_none_for_missing_reference() -> None:
+    repository = InMemoryReferenceRepository()
+
+    assert repository.get("missing") is None
+
+
+def test_in_memory_reference_repository_filters_unresolved_references() -> None:
+    repository = InMemoryReferenceRepository()
+    resolved = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+    unresolved = make_reference("ref-2", None)
+
+    repository.save(resolved)
+    repository.save(unresolved)
+
+    assert repository.find_unresolved() == [unresolved]
+
+
+def test_in_memory_reference_repository_upserts_by_reference_id() -> None:
+    repository = InMemoryReferenceRepository()
+    unresolved = make_reference("ref-1", None)
+    resolved = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+
+    repository.save(unresolved)
+    repository.save(resolved)
+
+    assert repository.get("ref-1") == resolved
+    assert repository.find_unresolved() == []
