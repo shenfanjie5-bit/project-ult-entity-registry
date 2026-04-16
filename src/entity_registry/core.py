@@ -1,0 +1,145 @@
+"""Core entity models and canonical ID rules."""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime
+from enum import Enum
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class EntityType(str, Enum):
+    """Supported canonical entity categories."""
+
+    STOCK = "stock"
+    CORP = "corp"
+    PERSON = "person"
+    ORG = "org"
+    INDEX = "index"
+
+
+class EntityStatus(str, Enum):
+    """Lifecycle status for canonical entities."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    MERGED = "merged"
+
+
+class AliasType(str, Enum):
+    """Supported alias categories."""
+
+    FULL_NAME = "full_name"
+    SHORT_NAME = "short_name"
+    CODE = "code"
+    ENGLISH = "english"
+    FORMER_NAME = "former_name"
+    CNSPELL = "cnspell"
+
+
+class ResolutionMethod(str, Enum):
+    """Resolution paths recorded for entity references."""
+
+    DETERMINISTIC = "deterministic"
+    FUZZY = "fuzzy"
+    LLM = "llm"
+    MANUAL = "manual"
+    UNRESOLVED = "unresolved"
+
+
+class DecisionType(str, Enum):
+    """Decision sources for resolution audit cases."""
+
+    AUTO = "auto"
+    LLM_ASSISTED = "llm_assisted"
+    MANUAL_REVIEW = "manual_review"
+
+
+class FinalStatus(str, Enum):
+    """Final runtime status for a mention candidate set."""
+
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+    MANUAL_REVIEW = "manual_review"
+
+
+_ENTITY_ID_PATTERN = re.compile(r"^ENT_[A-Z][A-Z0-9]*_[A-Za-z0-9][A-Za-z0-9._-]*$")
+_TS_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def generate_stock_entity_id(ts_code: str) -> str:
+    """Generate the canonical ID for a listed stock from its exchange code."""
+
+    if not isinstance(ts_code, str):
+        raise ValueError("ts_code must be a string")
+
+    normalized_ts_code = ts_code.strip()
+    if not normalized_ts_code:
+        raise ValueError("ts_code must not be empty")
+    if not _TS_CODE_PATTERN.fullmatch(normalized_ts_code):
+        raise ValueError("ts_code contains unsupported characters")
+
+    return f"ENT_STOCK_{normalized_ts_code}"
+
+
+def validate_entity_id(entity_id: str) -> bool:
+    """Return whether a canonical entity ID follows the ENT_* namespace format."""
+
+    if not isinstance(entity_id, str):
+        return False
+
+    normalized_entity_id = entity_id.strip()
+    if normalized_entity_id != entity_id:
+        return False
+
+    return bool(_ENTITY_ID_PATTERN.fullmatch(entity_id))
+
+
+class CanonicalEntity(BaseModel):
+    """System-level canonical entity record."""
+
+    canonical_entity_id: str
+    entity_type: EntityType
+    display_name: str
+    status: EntityStatus
+    anchor_code: str | None = None
+    cross_listing_group: str | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+    @model_validator(mode="after")
+    def validate_canonical_entity(self) -> CanonicalEntity:
+        if not validate_entity_id(self.canonical_entity_id):
+            raise ValueError("canonical_entity_id must use the ENT_* namespace")
+
+        if self.entity_type is EntityType.STOCK and self.anchor_code is None:
+            raise ValueError("anchor_code is required for stock entities")
+
+        if self.canonical_entity_id.startswith("ENT_STOCK_") and self.anchor_code is None:
+            raise ValueError("anchor_code is required for ENT_STOCK_* IDs")
+
+        return self
+
+
+class EntityAlias(BaseModel):
+    """Alias mapping from raw text to a canonical entity."""
+
+    canonical_entity_id: str
+    alias_text: str
+    alias_type: AliasType
+    confidence: float
+    source: str
+    is_primary: bool
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    @field_validator("confidence")
+    @classmethod
+    def validate_confidence(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError("confidence must be between 0.0 and 1.0")
+        return value
