@@ -325,6 +325,24 @@ def test_in_memory_resolution_audit_repository_stages_case_before_reference() ->
     assert case_repo.find_by_reference("ref-1") == []
 
 
+def test_in_memory_resolution_audit_repository_rolls_back_case_write_failure() -> None:
+    case_repo = FailingCaseWriteRepository()
+    repository = InMemoryResolutionAuditReferenceRepository(case_repo)
+    reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+    case = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+
+    try:
+        repository.save_resolution(reference, case)
+    except RuntimeError as exc:
+        assert str(exc) == "case write failed"
+    else:
+        raise AssertionError("case write failure should propagate")
+
+    assert repository.get("ref-1") is None
+    assert case_repo.get("case-1") is None
+    assert case_repo.find_by_reference("ref-1") == []
+
+
 def test_in_memory_resolution_audit_repository_rejects_mismatched_case() -> None:
     case_repo = InMemoryResolutionCaseRepository()
     repository = InMemoryResolutionAuditReferenceRepository(case_repo)
@@ -391,3 +409,8 @@ def test_in_memory_resolution_case_repository_upserts_by_case_id() -> None:
 class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
     def _validate_save(self, case: ResolutionCase) -> None:
         raise RuntimeError("case persistence failed")
+
+
+class FailingCaseWriteRepository(InMemoryResolutionCaseRepository):
+    def _save_unchecked(self, case: ResolutionCase) -> None:
+        raise RuntimeError("case write failed")

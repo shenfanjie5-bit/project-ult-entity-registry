@@ -208,8 +208,25 @@ class InMemoryResolutionAuditReferenceRepository(InMemoryReferenceRepository):
                     "resolution case reference_id must match EntityReference",
                 )
             self._case_repo._validate_save(case)
-            self._save_unchecked(reference)
-            self._case_repo._save_unchecked(case)
+            reference_existed = reference.reference_id in self._references
+            previous_reference = self._references.get(reference.reference_id)
+            case_existed = case.case_id in self._case_repo._cases
+            previous_case = self._case_repo._cases.get(case.case_id)
+
+            try:
+                self._save_unchecked(reference)
+                self._case_repo._save_unchecked(case)
+            except Exception:
+                if reference_existed and previous_reference is not None:
+                    self._references[reference.reference_id] = previous_reference
+                else:
+                    self._references.pop(reference.reference_id, None)
+
+                if case_existed and previous_case is not None:
+                    self._case_repo._cases[case.case_id] = previous_case
+                else:
+                    self._case_repo._cases.pop(case.case_id, None)
+                raise
 
 
 class InMemoryResolutionCaseRepository:
