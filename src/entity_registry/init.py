@@ -18,7 +18,12 @@ from entity_registry.core import (
     EntityType,
     generate_stock_entity_id,
 )
-from entity_registry.storage import AliasRepository, EntityRepository
+from entity_registry.storage import (
+    AliasRepository,
+    EntityRepository,
+    InMemoryAliasRepository,
+    InMemoryEntityRepository,
+)
 
 
 class StockBasicRecord(BaseModel):
@@ -105,7 +110,21 @@ def detect_cross_listing_groups(records: list[StockBasicRecord]) -> dict[str, st
     return groups
 
 
-def initialize_from_stock_basic(
+_DEFAULT_ENTITY_REPOSITORY = InMemoryEntityRepository()
+_DEFAULT_ALIAS_REPOSITORY = InMemoryAliasRepository()
+
+
+def initialize_from_stock_basic(snapshot_ref: str) -> None:
+    """Initialize canonical stock entities and aliases from a stock_basic snapshot."""
+
+    initialize_from_stock_basic_into(
+        snapshot_ref,
+        _DEFAULT_ENTITY_REPOSITORY,
+        _DEFAULT_ALIAS_REPOSITORY,
+    )
+
+
+def initialize_from_stock_basic_into(
     snapshot_ref: str,
     entity_repo: EntityRepository,
     alias_repo: AliasRepository,

@@ -1,15 +1,17 @@
+import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+import entity_registry
 from entity_registry.core import AliasType, EntityStatus
 from entity_registry.init import (
     InitializationResult,
     StockBasicRecord,
     detect_cross_listing_groups,
-    initialize_from_stock_basic,
+    initialize_from_stock_basic_into,
     load_stock_basic_records,
 )
 from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepository
@@ -49,6 +51,15 @@ def test_initialization_result_builds() -> None:
 
     assert result.entities_created == 1
     assert result.errors == []
+
+
+def test_public_initialize_from_stock_basic_matches_project_contract(tmp_path: Path) -> None:
+    signature = inspect.signature(entity_registry.initialize_from_stock_basic)
+    snapshot = tmp_path / "empty.json"
+    snapshot.write_text("[]", encoding="utf-8")
+
+    assert list(signature.parameters) == ["snapshot_ref"]
+    assert entity_registry.initialize_from_stock_basic(str(snapshot)) is None
 
 
 def test_load_stock_basic_records_from_json_fixture() -> None:
@@ -180,7 +191,7 @@ def test_initialize_from_stock_basic_creates_entities_for_all_fixture_records() 
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
 
     assert result.entities_created == 24
     assert len(entity_repo.list_all()) == 24
@@ -191,7 +202,7 @@ def test_initialize_from_stock_basic_creates_required_aliases() -> None:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
 
     assert result.aliases_created >= 48
     for entity in entity_repo.list_all():
@@ -205,7 +216,7 @@ def test_initialize_from_stock_basic_sets_active_and_inactive_statuses() -> None
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
 
     active_entity = entity_repo.get("ENT_STOCK_300750.SZ")
     inactive_entity = entity_repo.get("ENT_STOCK_000003.SZ")
@@ -220,8 +231,8 @@ def test_initialize_from_stock_basic_is_idempotent() -> None:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    first = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
-    second = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    first = initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
+    second = initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
 
     assert first.entities_created == 24
     assert second.entities_created == 0
@@ -233,7 +244,7 @@ def test_initialize_from_stock_basic_uses_atomic_entity_insert() -> None:
     entity_repo = NoExistsEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
 
     assert result.entities_created == 24
     assert len(entity_repo.list_all()) == 24
@@ -246,7 +257,7 @@ def test_initialize_from_stock_basic_is_idempotent_under_concurrent_runs() -> No
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(
             executor.map(
-                lambda _: initialize_from_stock_basic(
+                lambda _: initialize_from_stock_basic_into(
                     str(FIXTURE_PATH),
                     entity_repo,
                     alias_repo,
@@ -275,7 +286,7 @@ def test_initialize_from_stock_basic_keeps_a_and_h_independent_but_linked() -> N
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
 
     a_share = entity_repo.get("ENT_STOCK_300750.SZ")
     h_share = entity_repo.get("ENT_STOCK_03750.HK")
@@ -291,7 +302,7 @@ def test_initialize_from_stock_basic_allows_duplicate_short_name_for_a_and_h() -
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    initialize_from_stock_basic_into(str(FIXTURE_PATH), entity_repo, alias_repo)
 
     aliases = alias_repo.find_by_text("宁德时代")
     assert {alias.canonical_entity_id for alias in aliases} == {
@@ -304,7 +315,7 @@ def test_initialize_from_stock_basic_empty_snapshot_returns_zero_counts(tmp_path
     snapshot = tmp_path / "empty.json"
     snapshot.write_text("[]", encoding="utf-8")
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         str(snapshot),
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
@@ -323,7 +334,7 @@ def test_initialize_from_stock_basic_reports_invalid_entity_id(tmp_path: Path) -
     payload = make_minimal_record_payload(ts_code="300750 SZ")
     snapshot.write_text(json.dumps([payload]), encoding="utf-8")
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         str(snapshot),
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
