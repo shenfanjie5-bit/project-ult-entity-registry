@@ -8,6 +8,7 @@ import pytest
 import entity_registry
 from entity_registry.core import AliasType, EntityStatus
 from entity_registry.init import (
+    InitializationError,
     InitializationResult,
     StockBasicRecord,
     detect_cross_listing_groups,
@@ -60,6 +61,58 @@ def test_public_initialize_from_stock_basic_matches_project_contract(tmp_path: P
 
     assert list(signature.parameters) == ["snapshot_ref"]
     assert entity_registry.initialize_from_stock_basic(str(snapshot)) is None
+
+
+def test_public_initialize_from_stock_basic_populates_default_lookup(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "stock_basic.json"
+    payload = make_minimal_record_payload(
+        ts_code="688019.SH",
+        symbol="688019",
+        name="安集科技",
+        fullname="安集微电子科技（上海）股份有限公司",
+        enname="Anji Microelectronics Technology Shanghai Co Ltd",
+        cnspell="AJKJ",
+        market="科创板",
+        exchange="SSE",
+        is_hs=None,
+    )
+    snapshot.write_text(json.dumps([payload]), encoding="utf-8")
+
+    assert entity_registry.initialize_from_stock_basic(str(snapshot)) is None
+
+    entity = entity_registry.lookup_alias("安集科技")
+    assert entity is not None
+    assert entity.canonical_entity_id == "ENT_STOCK_688019.SH"
+    assert entity_registry.get_default_entity_repository().get(
+        "ENT_STOCK_688019.SH"
+    ) == entity
+    aliases = entity_registry.get_default_alias_repository().find_by_entity(
+        "ENT_STOCK_688019.SH",
+    )
+    assert {alias.alias_type for alias in aliases} >= {
+        AliasType.SHORT_NAME,
+        AliasType.CODE,
+    }
+
+
+def test_public_initialize_from_stock_basic_raises_on_record_errors(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "bad-id.json"
+    payload = make_minimal_record_payload(ts_code="300750 SZ")
+    snapshot.write_text(json.dumps([payload]), encoding="utf-8")
+
+    with pytest.raises(
+        InitializationError,
+        match="stock_basic initialization failed",
+    ) as exc_info:
+        entity_registry.initialize_from_stock_basic(str(snapshot))
+
+    assert exc_info.value.result.entities_created == 0
+    assert exc_info.value.result.aliases_created == 0
+    assert "300750 SZ" in exc_info.value.result.errors[0]
 
 
 def test_load_stock_basic_records_from_json_fixture() -> None:

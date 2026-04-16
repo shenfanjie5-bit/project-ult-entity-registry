@@ -64,8 +64,8 @@ def generate_aliases_from_stock_basic(
 
 def lookup_alias(
     alias_text: str,
-    alias_repo: AliasRepository,
-    entity_repo: EntityRepository,
+    alias_repo: AliasRepository | None = None,
+    entity_repo: EntityRepository | None = None,
 ) -> CanonicalEntity | None:
     """Return a canonical entity only for one exact alias-to-entity match.
 
@@ -73,6 +73,15 @@ def lookup_alias(
     IDs also returns ``None`` so A+H listings and other ambiguous mentions do
     not silently collapse to one entity.
     """
+
+    if alias_repo is None:
+        from entity_registry.init import get_default_alias_repository
+
+        alias_repo = get_default_alias_repository()
+    if entity_repo is None:
+        from entity_registry.init import get_default_entity_repository
+
+        entity_repo = get_default_entity_repository()
 
     aliases = alias_repo.find_by_text(alias_text)
     canonical_entity_ids = {alias.canonical_entity_id for alias in aliases}

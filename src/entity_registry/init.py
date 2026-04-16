@@ -70,6 +70,15 @@ class InitializationResult(BaseModel):
     errors: list[str]
 
 
+class InitializationError(RuntimeError):
+    """Raised when the public stock_basic initializer cannot fully apply a snapshot."""
+
+    def __init__(self, result: InitializationResult) -> None:
+        self.result = result
+        joined_errors = "; ".join(result.errors)
+        super().__init__(f"stock_basic initialization failed: {joined_errors}")
+
+
 def load_stock_basic_records(snapshot_ref: str) -> list[StockBasicRecord]:
     """Load stock_basic records from a JSON or CSV snapshot path."""
 
@@ -114,14 +123,33 @@ _DEFAULT_ENTITY_REPOSITORY = InMemoryEntityRepository()
 _DEFAULT_ALIAS_REPOSITORY = InMemoryAliasRepository()
 
 
+def get_default_entity_repository() -> EntityRepository:
+    """Return the process-local default entity repository used by the public API.
+
+    This repository is intentionally in-process only for the current milestone;
+    durable configured repositories are expected to replace it in a later storage
+    integration milestone.
+    """
+
+    return _DEFAULT_ENTITY_REPOSITORY
+
+
+def get_default_alias_repository() -> AliasRepository:
+    """Return the process-local default alias repository used by the public API."""
+
+    return _DEFAULT_ALIAS_REPOSITORY
+
+
 def initialize_from_stock_basic(snapshot_ref: str) -> None:
     """Initialize canonical stock entities and aliases from a stock_basic snapshot."""
 
-    initialize_from_stock_basic_into(
+    result = initialize_from_stock_basic_into(
         snapshot_ref,
         _DEFAULT_ENTITY_REPOSITORY,
         _DEFAULT_ALIAS_REPOSITORY,
     )
+    if result.errors:
+        raise InitializationError(result)
 
 
 def initialize_from_stock_basic_into(
