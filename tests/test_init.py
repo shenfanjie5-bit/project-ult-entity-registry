@@ -1,18 +1,23 @@
 import json
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 
+import entity_registry
 from entity_registry.core import AliasType, EntityStatus
 from entity_registry.init import (
     DataPlatformStockBasicReader,
     FileStockBasicSnapshotReader,
+    InitializationError,
     InitializationResult,
     StockBasicRecord,
     detect_cross_listing_groups,
     initialize_from_stock_basic,
+    initialize_from_stock_basic_into,
     load_stock_basic_records,
 )
 from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepository
@@ -25,7 +30,7 @@ def initialize_from_fixture(
     entity_repo: InMemoryEntityRepository,
     alias_repo: InMemoryAliasRepository,
 ) -> InitializationResult:
-    return initialize_from_stock_basic(
+    return initialize_from_stock_basic_into(
         str(FIXTURE_PATH),
         entity_repo,
         alias_repo,
@@ -64,6 +69,34 @@ def test_initialization_result_builds() -> None:
 
     assert result.entities_created == 1
     assert result.errors == []
+
+
+def test_public_initialize_from_stock_basic_matches_project_contract() -> None:
+    signature = inspect.signature(entity_registry.initialize_from_stock_basic)
+
+    assert list(signature.parameters) == ["snapshot_ref"]
+    assert (
+        get_type_hints(entity_registry.initialize_from_stock_basic)["return"]
+        is type(None)
+    )
+
+
+def test_public_initialize_from_stock_basic_returns_none_for_fixture_snapshot() -> None:
+    result = initialize_from_stock_basic(str(FIXTURE_PATH))
+
+    assert result is None
+
+
+def test_public_initialize_from_stock_basic_raises_on_row_errors(tmp_path: Path) -> None:
+    snapshot = tmp_path / "bad-id.json"
+    payload = make_minimal_record_payload(ts_code="300750 SZ")
+    snapshot.write_text(json.dumps([payload]), encoding="utf-8")
+
+    with pytest.raises(InitializationError) as exc_info:
+        initialize_from_stock_basic(str(snapshot))
+
+    assert exc_info.value.errors
+    assert "300750 SZ" in str(exc_info.value)
 
 
 def test_load_stock_basic_records_from_json_fixture() -> None:
@@ -202,7 +235,7 @@ def test_data_platform_reader_maps_canonical_stock_basic_rows() -> None:
     assert records[1].list_date is None
 
 
-def test_initialize_from_stock_basic_uses_data_platform_reader_interface() -> None:
+def test_initialize_from_stock_basic_into_uses_data_platform_reader_interface() -> None:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
     reader = DataPlatformStockBasicReader(
@@ -211,7 +244,7 @@ def test_initialize_from_stock_basic_uses_data_platform_reader_interface() -> No
         )
     )
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         "canonical.stock_basic",
         entity_repo,
         alias_repo,
@@ -225,7 +258,7 @@ def test_initialize_from_stock_basic_uses_data_platform_reader_interface() -> No
     assert alias_repo.find_by_text("宁德时代")
 
 
-def test_initialize_from_stock_basic_defaults_to_data_platform_reader(
+def test_initialize_from_stock_basic_into_defaults_to_data_platform_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -239,7 +272,7 @@ def test_initialize_from_stock_basic_defaults_to_data_platform_reader(
 
     monkeypatch.setattr(DataPlatformStockBasicReader, "read", fake_read)
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         "canonical.stock_basic",
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
@@ -339,7 +372,7 @@ def test_initialize_from_stock_basic_is_idempotent_under_concurrent_runs() -> No
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(
             executor.map(
-                lambda _: initialize_from_stock_basic(
+                lambda _: initialize_from_stock_basic_into(
                     str(FIXTURE_PATH),
                     entity_repo,
                     alias_repo,
@@ -398,7 +431,7 @@ def test_initialize_from_stock_basic_empty_snapshot_returns_zero_counts(tmp_path
     snapshot = tmp_path / "empty.json"
     snapshot.write_text("[]", encoding="utf-8")
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         str(snapshot),
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
@@ -418,7 +451,7 @@ def test_initialize_from_stock_basic_reports_invalid_entity_id(tmp_path: Path) -
     payload = make_minimal_record_payload(ts_code="300750 SZ")
     snapshot.write_text(json.dumps([payload]), encoding="utf-8")
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         str(snapshot),
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),

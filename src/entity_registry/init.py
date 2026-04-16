@@ -20,7 +20,12 @@ from entity_registry.core import (
     EntityType,
     generate_stock_entity_id,
 )
-from entity_registry.storage import AliasRepository, EntityRepository
+from entity_registry.storage import (
+    AliasRepository,
+    EntityRepository,
+    InMemoryAliasRepository,
+    InMemoryEntityRepository,
+)
 
 
 class StockBasicRecord(BaseModel):
@@ -65,6 +70,14 @@ class InitializationResult(BaseModel):
     aliases_created: int
     cross_listing_groups: int
     errors: list[str]
+
+
+class InitializationError(RuntimeError):
+    """Raised when initialization finishes with row-level errors."""
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("stock_basic initialization failed: " + "; ".join(errors))
 
 
 class StockBasicSnapshotReader(Protocol):
@@ -156,13 +169,30 @@ def detect_cross_listing_groups(records: list[StockBasicRecord]) -> dict[str, st
     return groups
 
 
-def initialize_from_stock_basic(
+_DEFAULT_ENTITY_REPOSITORY = InMemoryEntityRepository()
+_DEFAULT_ALIAS_REPOSITORY = InMemoryAliasRepository()
+
+
+def initialize_from_stock_basic(snapshot_ref: str) -> None:
+    """Initialize canonical stock entities and aliases from a stock_basic snapshot."""
+
+    result = initialize_from_stock_basic_into(
+        snapshot_ref,
+        _DEFAULT_ENTITY_REPOSITORY,
+        _DEFAULT_ALIAS_REPOSITORY,
+        stock_basic_reader=_default_reader_for_snapshot(snapshot_ref),
+    )
+    if result.errors:
+        raise InitializationError(result.errors)
+
+
+def initialize_from_stock_basic_into(
     snapshot_ref: str,
     entity_repo: EntityRepository,
     alias_repo: AliasRepository,
     stock_basic_reader: StockBasicSnapshotReader | None = None,
 ) -> InitializationResult:
-    """Initialize canonical stock entities and aliases from a stock_basic snapshot."""
+    """Initialize stock entities into explicit repositories and return counters."""
 
     reader = (
         DataPlatformStockBasicReader()
@@ -203,6 +233,12 @@ def initialize_from_stock_basic(
         cross_listing_groups=len(set(cross_listing_groups.values())),
         errors=errors,
     )
+
+
+def _default_reader_for_snapshot(snapshot_ref: str) -> StockBasicSnapshotReader:
+    if Path(snapshot_ref).exists():
+        return FileStockBasicSnapshotReader()
+    return DataPlatformStockBasicReader()
 
 
 def _load_json_payload(path: Path) -> Any:
