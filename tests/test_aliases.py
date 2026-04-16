@@ -1,7 +1,14 @@
+import inspect
+from collections.abc import Iterator
+
+import pytest
+
+import entity_registry
 from entity_registry.aliases import (
     AliasManager,
     generate_aliases_from_stock_basic,
     lookup_alias,
+    normalize_alias_text,
 )
 from entity_registry.core import (
     AliasType,
@@ -12,6 +19,13 @@ from entity_registry.core import (
 )
 from entity_registry.init import StockBasicRecord
 from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepository
+
+
+@pytest.fixture(autouse=True)
+def reset_public_repositories() -> Iterator[None]:
+    entity_registry.reset_default_repositories()
+    yield
+    entity_registry.reset_default_repositories()
 
 
 def make_stock_record(**overrides: object) -> StockBasicRecord:
@@ -118,6 +132,10 @@ def test_generate_aliases_strips_optional_field_whitespace() -> None:
     assert english_alias.alias_text == "CATL"
 
 
+def test_normalize_alias_text_strips_outer_whitespace() -> None:
+    assert normalize_alias_text(" 贵州茅台 ") == "贵州茅台"
+
+
 def test_generate_aliases_keeps_same_text_with_different_types() -> None:
     aliases = generate_aliases_from_stock_basic(
         make_stock_record(fullname="宁德时代"),
@@ -185,19 +203,18 @@ def test_lookup_alias_returns_canonical_entity_for_unique_match() -> None:
 
     entity_repo.save(entity)
     alias_repo.save(alias)
+    entity_registry.configure_default_repositories(entity_repo, alias_repo)
 
-    assert lookup_alias("宁德时代", alias_repo, entity_repo) == entity
+    assert lookup_alias(" 宁德时代 ") == entity
 
 
 def test_lookup_alias_returns_none_for_missing_alias() -> None:
-    assert (
-        lookup_alias(
-            "不存在的别名",
-            InMemoryAliasRepository(),
-            InMemoryEntityRepository(),
-        )
-        is None
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
     )
+
+    assert lookup_alias("不存在的别名") is None
 
 
 def test_lookup_alias_returns_none_for_a_h_ambiguous_alias() -> None:
@@ -218,8 +235,15 @@ def test_lookup_alias_returns_none_for_a_h_ambiguous_alias() -> None:
             make_alias(entity_id=h_share.canonical_entity_id, alias_text="宁德时代"),
         ]
     )
+    entity_registry.configure_default_repositories(entity_repo, alias_repo)
 
-    assert lookup_alias("宁德时代", alias_repo, entity_repo) is None
+    assert lookup_alias("宁德时代") is None
+
+
+def test_lookup_alias_public_signature_matches_contract() -> None:
+    signature = inspect.signature(lookup_alias)
+
+    assert list(signature.parameters) == ["alias_text"]
 
 
 def test_alias_manager_get_entity_aliases_returns_all_aliases() -> None:

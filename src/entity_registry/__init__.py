@@ -36,6 +36,7 @@ from entity_registry.init import (
     reset_default_repositories,
 )
 from entity_registry.references import EntityReference, ResolutionCase
+from entity_registry.resolution import DeterministicMatcher
 from entity_registry.resolution_types import (
     BatchResolutionJob,
     MentionCandidateSet,
@@ -53,6 +54,7 @@ __all__ = [
     "CanonicalEntity",
     "DataPlatformStockBasicReader",
     "DecisionType",
+    "DeterministicMatcher",
     "EntityAlias",
     "EntityReference",
     "EntityStatus",

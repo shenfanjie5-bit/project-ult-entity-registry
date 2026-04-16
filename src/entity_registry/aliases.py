@@ -22,6 +22,12 @@ def _clean_alias_text(value: str | None) -> str | None:
     return cleaned or None
 
 
+def normalize_alias_text(alias_text: str) -> str:
+    """Normalize user-supplied alias text for exact-match lookup."""
+
+    return alias_text.strip()
+
+
 def generate_aliases_from_stock_basic(
     record: StockBasicRecord,
     canonical_entity_id: str,
@@ -62,10 +68,17 @@ def generate_aliases_from_stock_basic(
     return aliases
 
 
-def lookup_alias(
+def lookup_alias(alias_text: str) -> CanonicalEntity | None:
+    """Return a canonical entity only for one exact alias-to-entity match."""
+
+    entity_repo, alias_repo = _get_default_repositories()
+    return lookup_alias_in_repositories(alias_text, alias_repo, entity_repo)
+
+
+def lookup_alias_in_repositories(
     alias_text: str,
-    alias_repo: AliasRepository | None = None,
-    entity_repo: EntityRepository | None = None,
+    alias_repo: AliasRepository,
+    entity_repo: EntityRepository,
 ) -> CanonicalEntity | None:
     """Return a canonical entity only for one exact alias-to-entity match.
 
@@ -74,20 +87,7 @@ def lookup_alias(
     not silently collapse to one entity.
     """
 
-    if alias_repo is None and entity_repo is None:
-        from entity_registry.init import get_default_repositories
-
-        entity_repo, alias_repo = get_default_repositories()
-    elif alias_repo is None:
-        from entity_registry.init import get_default_alias_repository
-
-        alias_repo = get_default_alias_repository()
-    elif entity_repo is None:
-        from entity_registry.init import get_default_entity_repository
-
-        entity_repo = get_default_entity_repository()
-
-    aliases = alias_repo.find_by_text(alias_text)
+    aliases = alias_repo.find_by_text(normalize_alias_text(alias_text))
     canonical_entity_ids = {alias.canonical_entity_id for alias in aliases}
 
     if len(canonical_entity_ids) != 1:
@@ -116,9 +116,15 @@ class AliasManager:
     def lookup(self, alias_text: str) -> list[EntityAlias]:
         """Return exact text matches for an alias."""
 
-        return self._alias_repo.find_by_text(alias_text)
+        return self._alias_repo.find_by_text(normalize_alias_text(alias_text))
 
     def get_entity_aliases(self, canonical_entity_id: str) -> list[EntityAlias]:
         """Return all aliases attached to one canonical entity."""
 
         return self._alias_repo.find_by_entity(canonical_entity_id)
+
+
+def _get_default_repositories() -> tuple[EntityRepository, AliasRepository]:
+    from entity_registry.init import get_default_repositories
+
+    return get_default_repositories()
