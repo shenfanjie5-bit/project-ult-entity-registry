@@ -193,6 +193,25 @@ def test_in_memory_audit_repositories_require_named_local_opt_in() -> None:
     assert configured == (entity_repo, alias_repo, reference_repo, case_repo)
 
 
+def test_package_in_memory_audit_helper_configures_public_resolution() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    reference_repo, case_repo = (
+        entity_registry.configure_default_in_memory_audit_repositories(
+            entity_repo,
+            alias_repo,
+        )
+    )
+    initialize_from_fixture(entity_repo, alias_repo)
+
+    result = entity_registry.resolve_mention("贵州茅台")
+    unresolved = reference_repo.find_unresolved()
+
+    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert unresolved == []
+    assert len(case_repo.find_by_reference(next(iter(reference_repo._references)))) == 1
+
+
 def test_public_initialize_uses_captured_repository_context(monkeypatch: pytest.MonkeyPatch) -> None:
     first_entity_repo = InMemoryEntityRepository()
     first_alias_repo = InMemoryAliasRepository()

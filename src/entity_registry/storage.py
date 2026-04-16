@@ -30,6 +30,8 @@ class AliasRepository(Protocol):
 
     def find_by_entity(self, entity_id: str) -> list[EntityAlias]: ...
 
+    def list_all(self) -> list[EntityAlias]: ...
+
     def save(self, alias: EntityAlias) -> None: ...
 
     def save_if_absent(self, alias: EntityAlias) -> bool: ...
@@ -109,6 +111,14 @@ class InMemoryAliasRepository:
         with self._lock:
             return list(self._by_entity.get(entity_id, []))
 
+    def list_all(self) -> list[EntityAlias]:
+        with self._lock:
+            return [
+                alias
+                for entity_aliases in self._by_entity.values()
+                for alias in entity_aliases
+            ]
+
     def save(self, alias: EntityAlias) -> None:
         self.save_if_absent(alias)
 
@@ -151,22 +161,72 @@ class InMemoryReferenceRepository:
 
     def __init__(self) -> None:
         self._references: dict[str, EntityReference] = {}
+        self._lock = RLock()
 
     def save(self, ref: EntityReference) -> None:
-        self._references[ref.reference_id] = ref
+        with self._lock:
+            self._save_unchecked(ref)
 
     def delete(self, reference_id: str) -> None:
-        self._references.pop(reference_id, None)
+        with self._lock:
+            self._references.pop(reference_id, None)
 
     def get(self, reference_id: str) -> EntityReference | None:
-        return self._references.get(reference_id)
+        with self._lock:
+            return self._references.get(reference_id)
 
     def find_unresolved(self) -> list[EntityReference]:
-        return [
-            ref
-            for ref in self._references.values()
-            if ref.resolved_entity_id is None
-        ]
+        with self._lock:
+            return [
+                ref
+                for ref in self._references.values()
+                if ref.resolved_entity_id is None
+            ]
+
+    def _save_unchecked(self, ref: EntityReference) -> None:
+        self._references[ref.reference_id] = ref
+
+
+class InMemoryResolutionAuditReferenceRepository(InMemoryReferenceRepository):
+    """In-memory reference repository with native resolution-case audit writes."""
+
+    def __init__(self, case_repo: "InMemoryResolutionCaseRepository") -> None:
+        super().__init__()
+        self._case_repo = case_repo
+        shared_lock = RLock()
+        self._lock = shared_lock
+        self._case_repo._lock = shared_lock
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        with self._lock:
+            if case.reference_id != reference.reference_id:
+                raise ValueError(
+                    "resolution case reference_id must match EntityReference",
+                )
+            self._case_repo._validate_save(case)
+            reference_existed = reference.reference_id in self._references
+            previous_reference = self._references.get(reference.reference_id)
+            case_existed = case.case_id in self._case_repo._cases
+            previous_case = self._case_repo._cases.get(case.case_id)
+
+            try:
+                self._save_unchecked(reference)
+                self._case_repo._save_unchecked(case)
+            except Exception:
+                if reference_existed and previous_reference is not None:
+                    self._references[reference.reference_id] = previous_reference
+                else:
+                    self._references.pop(reference.reference_id, None)
+
+                if case_existed and previous_case is not None:
+                    self._case_repo._cases[case.case_id] = previous_case
+                else:
+                    self._case_repo._cases.pop(case.case_id, None)
+                raise
 
 
 class InMemoryResolutionCaseRepository:
@@ -174,19 +234,30 @@ class InMemoryResolutionCaseRepository:
 
     def __init__(self) -> None:
         self._cases: dict[str, ResolutionCase] = {}
+        self._lock = RLock()
 
     def save(self, case: ResolutionCase) -> None:
-        self._cases[case.case_id] = case
+        with self._lock:
+            self._validate_save(case)
+            self._save_unchecked(case)
 
     def get(self, case_id: str) -> ResolutionCase | None:
-        return self._cases.get(case_id)
+        with self._lock:
+            return self._cases.get(case_id)
 
     def find_by_reference(self, reference_id: str) -> list[ResolutionCase]:
-        return [
-            case
-            for case in self._cases.values()
-            if case.reference_id == reference_id
-        ]
+        with self._lock:
+            return [
+                case
+                for case in self._cases.values()
+                if case.reference_id == reference_id
+            ]
+
+    def _validate_save(self, case: ResolutionCase) -> None:
+        return None
+
+    def _save_unchecked(self, case: ResolutionCase) -> None:
+        self._cases[case.case_id] = case
 
 
 def _alias_semantic_key(alias: EntityAlias) -> tuple[str, str, str]:

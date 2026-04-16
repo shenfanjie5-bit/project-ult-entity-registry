@@ -27,6 +27,7 @@ from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
     InMemoryReferenceRepository,
+    InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
     ResolutionCaseRepository,
@@ -235,8 +236,8 @@ def configure_default_in_memory_audit_repositories(
     paths should pass durable audit repositories to configure_default_repositories().
     """
 
-    reference_repo = InMemoryReferenceRepository()
     case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
     configure_default_repositories(
         entity_repo,
         alias_repo,
