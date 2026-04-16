@@ -297,6 +297,28 @@ def test_resolved_case_write_failure_preserves_reference_for_retry() -> None:
     assert exc_info.value.case.reference_id == references[0].reference_id
 
 
+def test_case_write_failure_does_not_delete_reference_evidence() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    reference_repo = DeleteTrackingReferenceRepository()
+
+    with pytest.raises(ResolutionAuditWriteError, match="case write failed"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=FailingResolutionCaseRepository(),
+        )
+
+    references = saved_references(reference_repo)
+    assert reference_repo.delete_calls == []
+    assert len(references) == 1
+    assert references[0].resolved_entity_id == "ENT_STOCK_600519.SH"
+
+
 def test_unresolved_case_write_failure_preserves_reference_for_retry() -> None:
     entity_repo, alias_repo, reference_repo, _case_repo = (
         initialized_resolution_repositories()
@@ -384,3 +406,13 @@ class FlappingAliasRepository:
 class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
     def save(self, case: entity_registry.ResolutionCase) -> None:
         raise RuntimeError("case write failed")
+
+
+class DeleteTrackingReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.delete_calls: list[str] = []
+
+    def delete(self, reference_id: str) -> None:
+        self.delete_calls.append(reference_id)
+        super().delete(reference_id)
