@@ -201,6 +201,28 @@ def test_fuzzy_audit_save_failure_does_not_delete_or_half_save(
     assert case_repo.find_by_reference("any") == []
 
 
+@pytest.mark.parametrize(
+    "threshold",
+    [-0.01, 1.01, float("inf"), float("nan")],
+)
+def test_invalid_fuzzy_auto_resolve_threshold_fails_fast(
+    initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
+    threshold: float,
+) -> None:
+    entity_repo, alias_repo = initialized_repositories
+    fuzzy_matcher = ThresholdFuzzyMatcher(threshold)
+
+    with pytest.raises(ValueError, match="auto_resolve_score"):
+        resolve_mention_with_repositories(
+            "贵州茅台股份",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            audit_repo=CapturingAuditRepository(),
+            fuzzy_matcher=fuzzy_matcher,
+        )
+
+
 def test_resolution_candidate_set_snapshot_includes_deterministic_and_fuzzy_ids(
     initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
 ) -> None:
@@ -252,6 +274,12 @@ class RecordingFuzzyMatcher:
     ) -> list[FuzzyCandidate]:
         self.calls.append(raw_mention_text)
         return self._candidates[:limit]
+
+
+class ThresholdFuzzyMatcher(RecordingFuzzyMatcher):
+    def __init__(self, auto_resolve_score: float) -> None:
+        super().__init__([])
+        self.auto_resolve_score = auto_resolve_score
 
 
 class StaticNERExtractor:

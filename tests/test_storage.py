@@ -307,6 +307,41 @@ def test_in_memory_resolution_audit_reference_repository_saves_reference_and_cas
     assert case_repo.get("case-1") == case
 
 
+def test_in_memory_resolution_audit_repository_stages_case_before_reference() -> None:
+    case_repo = FailingResolutionCaseRepository()
+    repository = InMemoryResolutionAuditReferenceRepository(case_repo)
+    reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+    case = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+
+    try:
+        repository.save_resolution(reference, case)
+    except RuntimeError as exc:
+        assert str(exc) == "case persistence failed"
+    else:
+        raise AssertionError("case persistence failure should propagate")
+
+    assert repository.get("ref-1") is None
+    assert case_repo.get("case-1") is None
+    assert case_repo.find_by_reference("ref-1") == []
+
+
+def test_in_memory_resolution_audit_repository_rejects_mismatched_case() -> None:
+    case_repo = InMemoryResolutionCaseRepository()
+    repository = InMemoryResolutionAuditReferenceRepository(case_repo)
+    reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+    case = make_case("case-1", "other-ref", "ENT_STOCK_300750.SZ")
+
+    try:
+        repository.save_resolution(reference, case)
+    except ValueError as exc:
+        assert "reference_id" in str(exc)
+    else:
+        raise AssertionError("mismatched audit records should fail")
+
+    assert repository.get("ref-1") is None
+    assert case_repo.get("case-1") is None
+
+
 def test_resolution_case_repository_protocol_is_usable_for_in_memory() -> None:
     repository: ResolutionCaseRepository = InMemoryResolutionCaseRepository()
 
@@ -351,3 +386,8 @@ def test_in_memory_resolution_case_repository_upserts_by_case_id() -> None:
 
     assert repository.get("case-1") == updated
     assert repository.find_by_reference("ref-1") == [updated]
+
+
+class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
+    def _validate_save(self, case: ResolutionCase) -> None:
+        raise RuntimeError("case persistence failed")

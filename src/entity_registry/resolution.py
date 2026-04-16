@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Protocol
 
 from entity_registry.aliases import AliasManager, normalize_alias_text
@@ -485,7 +486,15 @@ def _auto_resolve_threshold(fuzzy_matcher: FuzzyMatcher | None) -> float:
     if fuzzy_matcher is None:
         return 0.96
     threshold = getattr(fuzzy_matcher, "auto_resolve_score", 0.96)
-    return float(threshold)
+    try:
+        threshold_value = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "auto_resolve_score must be finite and between 0.0 and 1.0",
+        ) from exc
+    if not math.isfinite(threshold_value) or not 0.0 <= threshold_value <= 1.0:
+        raise ValueError("auto_resolve_score must be finite and between 0.0 and 1.0")
+    return threshold_value
 
 
 def _source_context_from(

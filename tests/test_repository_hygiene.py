@@ -1,4 +1,3 @@
-from pathlib import Path
 import subprocess
 
 import pytest
@@ -19,25 +18,22 @@ def test_generated_python_artifacts_are_not_tracked() -> None:
         pytest.skip("git metadata is unavailable")
 
     tracked_files = result.stdout.splitlines()
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
+    deleted_result = subprocess.run(
+        ["git", "ls-files", "--deleted"],
         check=False,
         capture_output=True,
         text=True,
     )
-    dirty_generated_artifacts = [
-        line
-        for line in status.stdout.splitlines()
-        if _is_generated_python_artifact(line[3:])
-    ]
-    if dirty_generated_artifacts:
-        pytest.skip("generated artifact cleanup is pending in the working tree")
-
+    deleted_files = (
+        set(deleted_result.stdout.splitlines())
+        if deleted_result.returncode == 0
+        else set()
+    )
     offenders = [
         path
         for path in tracked_files
-        if Path(path).exists()
-        and _is_generated_python_artifact(path)
+        if path not in deleted_files
+        if _is_generated_python_artifact(path)
     ]
 
     assert offenders == []
