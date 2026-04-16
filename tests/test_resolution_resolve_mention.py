@@ -21,6 +21,7 @@ from entity_registry.init import (
 )
 from entity_registry.references import EntityReference
 from entity_registry.resolution import (
+    ResolutionAuditWriteError,
     resolve_mention,
     resolve_mention_with_repositories,
 )
@@ -272,12 +273,12 @@ def test_public_resolve_mention_uses_configured_default_repositories() -> None:
     assert references[0].source_context["source_type"] == "announcement"
 
 
-def test_resolved_case_write_failure_rolls_back_reference() -> None:
+def test_resolved_case_write_failure_preserves_reference_for_retry() -> None:
     entity_repo, alias_repo, reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
 
-    with pytest.raises(RuntimeError, match="case write failed"):
+    with pytest.raises(ResolutionAuditWriteError, match="case write failed") as exc_info:
         resolve_mention_with_repositories(
             "贵州茅台",
             None,
@@ -287,16 +288,21 @@ def test_resolved_case_write_failure_rolls_back_reference() -> None:
             case_repo=FailingResolutionCaseRepository(),
         )
 
-    assert saved_references(reference_repo) == []
+    references = saved_references(reference_repo)
+    assert len(references) == 1
+    assert references[0].resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert references[0].resolution_method is ResolutionMethod.DETERMINISTIC
     assert reference_repo.find_unresolved() == []
+    assert exc_info.value.reference == references[0]
+    assert exc_info.value.case.reference_id == references[0].reference_id
 
 
-def test_unresolved_case_write_failure_rolls_back_reference() -> None:
+def test_unresolved_case_write_failure_preserves_reference_for_retry() -> None:
     entity_repo, alias_repo, reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
 
-    with pytest.raises(RuntimeError, match="case write failed"):
+    with pytest.raises(ResolutionAuditWriteError, match="case write failed") as exc_info:
         resolve_mention_with_repositories(
             "不存在的公司",
             None,
@@ -306,8 +312,14 @@ def test_unresolved_case_write_failure_rolls_back_reference() -> None:
             case_repo=FailingResolutionCaseRepository(),
         )
 
-    assert saved_references(reference_repo) == []
-    assert reference_repo.find_unresolved() == []
+    references = saved_references(reference_repo)
+    unresolved = reference_repo.find_unresolved()
+    assert len(references) == 1
+    assert unresolved == references
+    assert references[0].resolved_entity_id is None
+    assert references[0].resolution_method is ResolutionMethod.UNRESOLVED
+    assert exc_info.value.reference == references[0]
+    assert exc_info.value.case.reference_id == references[0].reference_id
 
 
 def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:

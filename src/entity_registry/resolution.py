@@ -18,7 +18,6 @@ from entity_registry.references import (
     ResolutionCase,
     _new_case_id,
     _new_reference_id,
-    record_resolution_case,
 )
 from entity_registry.resolution_types import (
     MentionCandidateSet,
@@ -32,6 +31,51 @@ from entity_registry.storage import (
     ReferenceRepository,
     ResolutionCaseRepository,
 )
+
+
+class ResolutionAuditWriteError(RuntimeError):
+    """Raised when a resolution audit write is left pending for retry."""
+
+    def __init__(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+        cause: Exception,
+    ) -> None:
+        self.reference = reference
+        self.case = case
+        super().__init__(
+            "resolution audit case write failed after preserving reference "
+            f"{reference.reference_id} for retry: {cause}"
+        )
+
+
+class ResolutionAuditRepository:
+    """Unit of work for writing a reference and its resolution case."""
+
+    def __init__(
+        self,
+        reference_repo: ReferenceRepository,
+        case_repo: ResolutionCaseRepository,
+    ) -> None:
+        self._reference_repo = reference_repo
+        self._case_repo = case_repo
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        transactional_save = getattr(self._reference_repo, "save_resolution", None)
+        if callable(transactional_save):
+            transactional_save(reference, case)
+            return
+
+        self._reference_repo.save(reference)
+        try:
+            self._case_repo.save(case)
+        except Exception as exc:
+            raise ResolutionAuditWriteError(reference, case, exc) from exc
 
 
 class DeterministicMatcher:
@@ -283,12 +327,8 @@ def _save_resolution_audit(
     reference_repo: ReferenceRepository,
     case_repo: ResolutionCaseRepository,
 ) -> None:
-    reference_repo.save(reference)
-    try:
-        record_resolution_case(case, case_repo)
-    except Exception:
-        reference_repo.delete(reference.reference_id)
-        raise
+    audit_repo = ResolutionAuditRepository(reference_repo, case_repo)
+    audit_repo.save_resolution(reference, case)
 
 
 def _source_context_from(
@@ -305,6 +345,8 @@ def _source_context_from(
 
 __all__ = [
     "DeterministicMatcher",
+    "ResolutionAuditRepository",
+    "ResolutionAuditWriteError",
     "resolve_mention",
     "resolve_mention_with_repositories",
 ]
