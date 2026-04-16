@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, Protocol
 
 from pydantic import BaseModel, field_validator
@@ -176,8 +177,14 @@ def detect_cross_listing_groups(records: list[StockBasicRecord]) -> dict[str, st
     return groups
 
 
-_DEFAULT_ENTITY_REPOSITORY: EntityRepository | None = None
-_DEFAULT_ALIAS_REPOSITORY: AliasRepository | None = None
+@dataclass(frozen=True, slots=True)
+class _RepositoryContext:
+    entity_repo: EntityRepository
+    alias_repo: AliasRepository
+
+
+_DEFAULT_REPOSITORY_CONTEXT: _RepositoryContext | None = None
+_DEFAULT_REPOSITORY_CONTEXT_LOCK = Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,50 +201,57 @@ def configure_default_repositories(
 ) -> None:
     """Configure repositories used by public package-level APIs."""
 
-    global _DEFAULT_ENTITY_REPOSITORY, _DEFAULT_ALIAS_REPOSITORY
-    _DEFAULT_ENTITY_REPOSITORY = entity_repo
-    _DEFAULT_ALIAS_REPOSITORY = alias_repo
+    global _DEFAULT_REPOSITORY_CONTEXT
+    context = _RepositoryContext(entity_repo=entity_repo, alias_repo=alias_repo)
+    with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
+        _DEFAULT_REPOSITORY_CONTEXT = context
 
 
 def reset_default_repositories() -> None:
     """Clear configured repositories for test isolation and fail-fast defaults."""
 
-    global _DEFAULT_ENTITY_REPOSITORY, _DEFAULT_ALIAS_REPOSITORY
-    _DEFAULT_ENTITY_REPOSITORY = None
-    _DEFAULT_ALIAS_REPOSITORY = None
+    global _DEFAULT_REPOSITORY_CONTEXT
+    with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
+        _DEFAULT_REPOSITORY_CONTEXT = None
+
+
+def get_default_repositories() -> tuple[EntityRepository, AliasRepository]:
+    """Return the configured default repository pair from one context snapshot."""
+
+    with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
+        context = _DEFAULT_REPOSITORY_CONTEXT
+
+    if context is None:
+        raise RepositoryNotConfiguredError(
+            "entity-registry repositories are not configured; "
+            "call configure_default_repositories() before using public initialization "
+            "or lookup APIs",
+        )
+    return context.entity_repo, context.alias_repo
 
 
 def get_default_entity_repository() -> EntityRepository:
     """Return the configured default entity repository."""
 
-    if _DEFAULT_ENTITY_REPOSITORY is None:
-        raise RepositoryNotConfiguredError(
-            "entity-registry repositories are not configured; "
-            "call configure_default_repositories() before using public initialization "
-            "or lookup APIs",
-        )
-    return _DEFAULT_ENTITY_REPOSITORY
+    entity_repo, _ = get_default_repositories()
+    return entity_repo
 
 
 def get_default_alias_repository() -> AliasRepository:
     """Return the configured default alias repository."""
 
-    if _DEFAULT_ALIAS_REPOSITORY is None:
-        raise RepositoryNotConfiguredError(
-            "entity-registry repositories are not configured; "
-            "call configure_default_repositories() before using public initialization "
-            "or lookup APIs",
-        )
-    return _DEFAULT_ALIAS_REPOSITORY
+    _, alias_repo = get_default_repositories()
+    return alias_repo
 
 
 def initialize_from_stock_basic(snapshot_ref: str) -> None:
     """Initialize canonical stock entities and aliases from a stock_basic snapshot."""
 
+    entity_repo, alias_repo = get_default_repositories()
     result = initialize_from_stock_basic_into(
         snapshot_ref,
-        get_default_entity_repository(),
-        get_default_alias_repository(),
+        entity_repo,
+        alias_repo,
         stock_basic_reader=_default_reader_for_snapshot(snapshot_ref),
     )
     if result.errors:

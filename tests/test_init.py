@@ -9,6 +9,7 @@ from typing import get_type_hints
 import pytest
 
 import entity_registry
+import entity_registry.init as init_module
 from entity_registry.core import AliasType, EntityStatus
 from entity_registry.init import (
     DataPlatformStockBasicReader,
@@ -93,6 +94,52 @@ def test_public_initialize_from_stock_basic_matches_project_contract() -> None:
 def test_public_initialize_from_stock_basic_fails_fast_without_repositories() -> None:
     with pytest.raises(RepositoryNotConfiguredError, match="not configured"):
         initialize_from_stock_basic(str(FIXTURE_PATH))
+
+
+def test_default_repository_context_returns_one_atomic_pair() -> None:
+    first_entity_repo = InMemoryEntityRepository()
+    first_alias_repo = InMemoryAliasRepository()
+    second_entity_repo = InMemoryEntityRepository()
+    second_alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(first_entity_repo, first_alias_repo)
+
+    entity_repo, alias_repo = entity_registry.get_default_repositories()
+    entity_registry.configure_default_repositories(second_entity_repo, second_alias_repo)
+
+    assert entity_repo is first_entity_repo
+    assert alias_repo is first_alias_repo
+    current_entity_repo, current_alias_repo = entity_registry.get_default_repositories()
+    assert current_entity_repo is second_entity_repo
+    assert current_alias_repo is second_alias_repo
+
+
+def test_public_initialize_uses_captured_repository_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_entity_repo = InMemoryEntityRepository()
+    first_alias_repo = InMemoryAliasRepository()
+    second_entity_repo = InMemoryEntityRepository()
+    second_alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(first_entity_repo, first_alias_repo)
+
+    class ReconfiguringReader:
+        def read(self, snapshot_ref: str) -> list[StockBasicRecord]:
+            entity_registry.configure_default_repositories(
+                second_entity_repo,
+                second_alias_repo,
+            )
+            return [StockBasicRecord(**make_minimal_record_payload())]
+
+    monkeypatch.setattr(
+        init_module,
+        "_default_reader_for_snapshot",
+        lambda snapshot_ref: ReconfiguringReader(),
+    )
+
+    initialize_from_stock_basic("stock-basic-from-test-reader")
+
+    assert first_entity_repo.get("ENT_STOCK_300750.SZ") is not None
+    assert first_alias_repo.find_by_entity("ENT_STOCK_300750.SZ")
+    assert second_entity_repo.list_all() == []
+    assert second_alias_repo.find_by_entity("ENT_STOCK_300750.SZ") == []
 
 
 def test_public_initialize_from_stock_basic_returns_none_for_fixture_snapshot() -> None:

@@ -74,11 +74,15 @@ def lookup_alias(
     not silently collapse to one entity.
     """
 
-    if alias_repo is None:
+    if alias_repo is None and entity_repo is None:
+        from entity_registry.init import get_default_repositories
+
+        entity_repo, alias_repo = get_default_repositories()
+    elif alias_repo is None:
         from entity_registry.init import get_default_alias_repository
 
         alias_repo = get_default_alias_repository()
-    if entity_repo is None:
+    elif entity_repo is None:
         from entity_registry.init import get_default_entity_repository
 
         entity_repo = get_default_entity_repository()
