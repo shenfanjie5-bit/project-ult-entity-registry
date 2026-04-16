@@ -1,11 +1,14 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from entity_registry.core import AliasType, EntityStatus
 from entity_registry.init import (
+    DataPlatformStockBasicReader,
+    FileStockBasicSnapshotReader,
     InitializationResult,
     StockBasicRecord,
     detect_cross_listing_groups,
@@ -16,6 +19,18 @@ from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepos
 
 
 FIXTURE_PATH = Path("tests/fixtures/stock_basic_sample.json")
+
+
+def initialize_from_fixture(
+    entity_repo: InMemoryEntityRepository,
+    alias_repo: InMemoryAliasRepository,
+) -> InitializationResult:
+    return initialize_from_stock_basic(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
 
 
 def test_stock_basic_record_normalizes_optional_empty_strings() -> None:
@@ -156,6 +171,84 @@ def test_load_stock_basic_records_rejects_unsupported_suffix(tmp_path: Path) -> 
         load_stock_basic_records(str(snapshot))
 
 
+def test_data_platform_reader_maps_canonical_stock_basic_rows() -> None:
+    calls: list[bool] = []
+
+    def canonical_loader(active_only: bool) -> FakeCanonicalTable:
+        calls.append(active_only)
+        return FakeCanonicalTable(
+            [
+                make_canonical_stock_basic_row(),
+                make_canonical_stock_basic_row(
+                    ts_code="000003.SZ",
+                    symbol="000003",
+                    name="PT金田A",
+                    is_active=False,
+                    list_date=None,
+                ),
+            ]
+        )
+
+    reader = DataPlatformStockBasicReader(canonical_loader=canonical_loader)
+
+    records = reader.read("canonical.stock_basic")
+
+    assert calls == [False]
+    assert records[0].ts_code == "300750.SZ"
+    assert records[0].exchange == "SZSE"
+    assert records[0].list_status == "L"
+    assert records[0].list_date == "20180611"
+    assert records[1].list_status == "D"
+    assert records[1].list_date is None
+
+
+def test_initialize_from_stock_basic_uses_data_platform_reader_interface() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    reader = DataPlatformStockBasicReader(
+        canonical_loader=lambda _active_only: FakeCanonicalTable(
+            [make_canonical_stock_basic_row()]
+        )
+    )
+
+    result = initialize_from_stock_basic(
+        "canonical.stock_basic",
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=reader,
+    )
+
+    entity = entity_repo.get("ENT_STOCK_300750.SZ")
+    assert result.entities_created == 1
+    assert entity is not None
+    assert entity.anchor_code == "300750.SZ"
+    assert alias_repo.find_by_text("宁德时代")
+
+
+def test_initialize_from_stock_basic_defaults_to_data_platform_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_read(
+        self: DataPlatformStockBasicReader,
+        snapshot_ref: str,
+    ) -> list[StockBasicRecord]:
+        calls.append(snapshot_ref)
+        return [StockBasicRecord.model_validate(make_minimal_record_payload())]
+
+    monkeypatch.setattr(DataPlatformStockBasicReader, "read", fake_read)
+
+    result = initialize_from_stock_basic(
+        "canonical.stock_basic",
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+    )
+
+    assert calls == ["canonical.stock_basic"]
+    assert result.entities_created == 1
+
+
 def test_detect_cross_listing_groups_identifies_fixture_pairs() -> None:
     groups = detect_cross_listing_groups(load_stock_basic_records(str(FIXTURE_PATH)))
 
@@ -180,7 +273,7 @@ def test_initialize_from_stock_basic_creates_entities_for_all_fixture_records() 
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_fixture(entity_repo, alias_repo)
 
     assert result.entities_created == 24
     assert len(entity_repo.list_all()) == 24
@@ -191,7 +284,7 @@ def test_initialize_from_stock_basic_creates_required_aliases() -> None:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_fixture(entity_repo, alias_repo)
 
     assert result.aliases_created >= 48
     for entity in entity_repo.list_all():
@@ -205,7 +298,7 @@ def test_initialize_from_stock_basic_sets_active_and_inactive_statuses() -> None
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    initialize_from_fixture(entity_repo, alias_repo)
 
     active_entity = entity_repo.get("ENT_STOCK_300750.SZ")
     inactive_entity = entity_repo.get("ENT_STOCK_000003.SZ")
@@ -220,8 +313,8 @@ def test_initialize_from_stock_basic_is_idempotent() -> None:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    first = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
-    second = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    first = initialize_from_fixture(entity_repo, alias_repo)
+    second = initialize_from_fixture(entity_repo, alias_repo)
 
     assert first.entities_created == 24
     assert second.entities_created == 0
@@ -233,7 +326,7 @@ def test_initialize_from_stock_basic_uses_atomic_entity_insert() -> None:
     entity_repo = NoExistsEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_fixture(entity_repo, alias_repo)
 
     assert result.entities_created == 24
     assert len(entity_repo.list_all()) == 24
@@ -250,6 +343,7 @@ def test_initialize_from_stock_basic_is_idempotent_under_concurrent_runs() -> No
                     str(FIXTURE_PATH),
                     entity_repo,
                     alias_repo,
+                    stock_basic_reader=FileStockBasicSnapshotReader(),
                 ),
                 range(4),
             )
@@ -275,7 +369,7 @@ def test_initialize_from_stock_basic_keeps_a_and_h_independent_but_linked() -> N
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    result = initialize_from_fixture(entity_repo, alias_repo)
 
     a_share = entity_repo.get("ENT_STOCK_300750.SZ")
     h_share = entity_repo.get("ENT_STOCK_03750.HK")
@@ -291,7 +385,7 @@ def test_initialize_from_stock_basic_allows_duplicate_short_name_for_a_and_h() -
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
 
-    initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+    initialize_from_fixture(entity_repo, alias_repo)
 
     aliases = alias_repo.find_by_text("宁德时代")
     assert {alias.canonical_entity_id for alias in aliases} == {
@@ -308,6 +402,7 @@ def test_initialize_from_stock_basic_empty_snapshot_returns_zero_counts(tmp_path
         str(snapshot),
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
+        stock_basic_reader=FileStockBasicSnapshotReader(),
     )
 
     assert result == InitializationResult(
@@ -327,6 +422,7 @@ def test_initialize_from_stock_basic_reports_invalid_entity_id(tmp_path: Path) -
         str(snapshot),
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
+        stock_basic_reader=FileStockBasicSnapshotReader(),
     )
 
     assert result.entities_created == 0
@@ -350,6 +446,29 @@ def make_minimal_record_payload(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+def make_canonical_stock_basic_row(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "ts_code": "300750.SZ",
+        "symbol": "300750",
+        "name": "宁德时代",
+        "market": "创业板",
+        "list_date": date(2018, 6, 11),
+        "is_active": True,
+        "source_run_id": "test-run",
+        "canonical_loaded_at": "2026-04-16T00:00:00",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class FakeCanonicalTable:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def to_pylist(self) -> list[dict[str, object]]:
+        return list(self._rows)
 
 
 class NoExistsEntityRepository(InMemoryEntityRepository):
