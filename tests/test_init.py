@@ -1,11 +1,15 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
 
 import pytest
 
+import entity_registry.init as init_module
 from entity_registry.core import AliasType, EntityStatus
 from entity_registry.init import (
+    DATA_PLATFORM_STOCK_BASIC_REF,
+    DataPlatformStockBasicReader,
     InitializationResult,
     StockBasicRecord,
     detect_cross_listing_groups,
@@ -156,6 +160,43 @@ def test_load_stock_basic_records_rejects_unsupported_suffix(tmp_path: Path) -> 
         load_stock_basic_records(str(snapshot))
 
 
+def test_data_platform_stock_basic_reader_maps_canonical_table_rows() -> None:
+    calls: list[bool] = []
+
+    def read_canonical_stock_basic(*, active_only: bool = True) -> FakeCanonicalTable:
+        calls.append(active_only)
+        return FakeCanonicalTable(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "symbol": "000001",
+                    "name": "平安银行",
+                    "market": "主板",
+                    "list_date": date(1991, 4, 3),
+                    "is_active": True,
+                    "source_run_id": "run-001",
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "symbol": "000002",
+                    "name": "万科A",
+                    "market": "主板",
+                    "list_date": date(1991, 1, 29),
+                    "is_active": False,
+                    "source_run_id": "run-001",
+                },
+            ]
+        )
+
+    reader = DataPlatformStockBasicReader(read_canonical_stock_basic)
+    records = reader.read(DATA_PLATFORM_STOCK_BASIC_REF)
+
+    assert calls == [False]
+    assert [record.exchange for record in records] == ["SZSE", "SZSE"]
+    assert [record.list_status for record in records] == ["L", "D"]
+    assert records[0].list_date == "1991-04-03"
+
+
 def test_detect_cross_listing_groups_identifies_fixture_pairs() -> None:
     groups = detect_cross_listing_groups(load_stock_basic_records(str(FIXTURE_PATH)))
 
@@ -185,6 +226,62 @@ def test_initialize_from_stock_basic_creates_entities_for_all_fixture_records() 
     assert result.entities_created == 24
     assert len(entity_repo.list_all()) == 24
     assert result.errors == []
+
+
+def test_initialize_from_stock_basic_uses_data_platform_reader_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    calls: list[bool] = []
+
+    def read_canonical_stock_basic(*, active_only: bool = True) -> FakeCanonicalTable:
+        calls.append(active_only)
+        return FakeCanonicalTable(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "symbol": "000001",
+                    "name": "平安银行",
+                    "market": "主板",
+                    "list_date": date(1991, 4, 3),
+                    "is_active": True,
+                    "source_run_id": "run-001",
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "symbol": "000002",
+                    "name": "万科A",
+                    "market": "主板",
+                    "list_date": date(1991, 1, 29),
+                    "is_active": False,
+                    "source_run_id": "run-001",
+                },
+            ]
+        )
+
+    monkeypatch.setattr(
+        init_module,
+        "_load_data_platform_stock_basic_reader",
+        lambda: read_canonical_stock_basic,
+    )
+
+    result = initialize_from_stock_basic(
+        DATA_PLATFORM_STOCK_BASIC_REF,
+        entity_repo,
+        alias_repo,
+    )
+
+    assert calls == [False]
+    assert result == InitializationResult(
+        entities_created=2,
+        aliases_created=4,
+        cross_listing_groups=0,
+        errors=[],
+    )
+    assert entity_repo.get("ENT_STOCK_000001.SZ").status is EntityStatus.ACTIVE
+    assert entity_repo.get("ENT_STOCK_000002.SZ").status is EntityStatus.INACTIVE
+    assert alias_repo.find_by_text("000001")[0].canonical_entity_id == "ENT_STOCK_000001.SZ"
 
 
 def test_initialize_from_stock_basic_creates_required_aliases() -> None:
@@ -355,3 +452,11 @@ def make_minimal_record_payload(**overrides: object) -> dict[str, object]:
 class NoExistsEntityRepository(InMemoryEntityRepository):
     def exists(self, entity_id: str) -> bool:
         raise AssertionError(f"exists() should not be used for {entity_id}")
+
+
+class FakeCanonicalTable:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def to_pylist(self) -> list[dict[str, object]]:
+        return self._rows
