@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from entity_registry.core import AliasType, EntityAlias
-from entity_registry.storage import AliasRepository
+from entity_registry.core import AliasType, CanonicalEntity, EntityAlias
+from entity_registry.storage import AliasRepository, EntityRepository
 
 if TYPE_CHECKING:
     from entity_registry.init import StockBasicRecord
@@ -60,6 +60,28 @@ def generate_aliases_from_stock_basic(
         )
 
     return aliases
+
+
+def lookup_alias(
+    alias_text: str,
+    alias_repo: AliasRepository,
+    entity_repo: EntityRepository,
+) -> CanonicalEntity | None:
+    """Return a canonical entity only for one exact alias-to-entity match.
+
+    No alias hit returns ``None``. Alias text that points at multiple canonical
+    IDs also returns ``None`` so A+H listings and other ambiguous mentions do
+    not silently collapse to one entity.
+    """
+
+    aliases = alias_repo.find_by_text(alias_text)
+    canonical_entity_ids = {alias.canonical_entity_id for alias in aliases}
+
+    if len(canonical_entity_ids) != 1:
+        return None
+
+    canonical_entity_id = next(iter(canonical_entity_ids))
+    return entity_repo.get(canonical_entity_id)
 
 
 class AliasManager:

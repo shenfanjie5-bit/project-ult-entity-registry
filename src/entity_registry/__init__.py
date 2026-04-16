@@ -12,7 +12,11 @@ from entity_registry.core import (
     generate_stock_entity_id,
     validate_entity_id,
 )
-from entity_registry.aliases import AliasManager, generate_aliases_from_stock_basic
+from entity_registry.aliases import (
+    AliasManager,
+    generate_aliases_from_stock_basic,
+    lookup_alias,
+)
 from entity_registry.init import (
     InitializationResult,
     StockBasicRecord,
@@ -54,5 +58,6 @@ __all__ = [
     "generate_stock_entity_id",
     "initialize_from_stock_basic",
     "load_stock_basic_records",
+    "lookup_alias",
     "validate_entity_id",
 ]

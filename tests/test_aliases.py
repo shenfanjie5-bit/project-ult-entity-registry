@@ -1,7 +1,17 @@
-from entity_registry.aliases import AliasManager, generate_aliases_from_stock_basic
-from entity_registry.core import AliasType, EntityAlias
+from entity_registry.aliases import (
+    AliasManager,
+    generate_aliases_from_stock_basic,
+    lookup_alias,
+)
+from entity_registry.core import (
+    AliasType,
+    CanonicalEntity,
+    EntityAlias,
+    EntityStatus,
+    EntityType,
+)
 from entity_registry.init import StockBasicRecord
-from entity_registry.storage import InMemoryAliasRepository
+from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepository
 
 
 def make_stock_record(**overrides: object) -> StockBasicRecord:
@@ -36,6 +46,22 @@ def make_alias(
         confidence=1.0,
         source="unit-test",
         is_primary=is_primary,
+    )
+
+
+def make_entity(
+    entity_id: str = "ENT_STOCK_300750.SZ",
+    *,
+    display_name: str = "宁德时代",
+    cross_listing_group: str | None = None,
+) -> CanonicalEntity:
+    return CanonicalEntity(
+        canonical_entity_id=entity_id,
+        entity_type=EntityType.STOCK,
+        display_name=display_name,
+        status=EntityStatus.ACTIVE,
+        anchor_code=entity_id.removeprefix("ENT_STOCK_"),
+        cross_listing_group=cross_listing_group,
     )
 
 
@@ -149,6 +175,51 @@ def test_alias_manager_lookup_returns_exact_matches() -> None:
 
     assert manager.lookup("宁德时代") == [alias]
     assert manager.lookup("宁德") == []
+
+
+def test_lookup_alias_returns_canonical_entity_for_unique_match() -> None:
+    alias_repo = InMemoryAliasRepository()
+    entity_repo = InMemoryEntityRepository()
+    entity = make_entity()
+    alias = make_alias(entity_id=entity.canonical_entity_id)
+
+    entity_repo.save(entity)
+    alias_repo.save(alias)
+
+    assert lookup_alias("宁德时代", alias_repo, entity_repo) == entity
+
+
+def test_lookup_alias_returns_none_for_missing_alias() -> None:
+    assert (
+        lookup_alias(
+            "不存在的别名",
+            InMemoryAliasRepository(),
+            InMemoryEntityRepository(),
+        )
+        is None
+    )
+
+
+def test_lookup_alias_returns_none_for_a_h_ambiguous_alias() -> None:
+    alias_repo = InMemoryAliasRepository()
+    entity_repo = InMemoryEntityRepository()
+    a_share = make_entity("ENT_STOCK_300750.SZ", cross_listing_group="XLG_CATL")
+    h_share = make_entity(
+        "ENT_STOCK_03750.HK",
+        display_name="宁德时代 H",
+        cross_listing_group="XLG_CATL",
+    )
+
+    entity_repo.save(a_share)
+    entity_repo.save(h_share)
+    alias_repo.save_batch(
+        [
+            make_alias(entity_id=a_share.canonical_entity_id, alias_text="宁德时代"),
+            make_alias(entity_id=h_share.canonical_entity_id, alias_text="宁德时代"),
+        ]
+    )
+
+    assert lookup_alias("宁德时代", alias_repo, entity_repo) is None
 
 
 def test_alias_manager_get_entity_aliases_returns_all_aliases() -> None:
