@@ -23,7 +23,12 @@ from entity_registry.init import (
     initialize_from_stock_basic_into,
     load_stock_basic_records,
 )
-from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepository
+from entity_registry.storage import (
+    InMemoryAliasRepository,
+    InMemoryEntityRepository,
+    InMemoryReferenceRepository,
+    InMemoryResolutionCaseRepository,
+)
 
 
 FIXTURE_PATH = Path("tests/fixtures/stock_basic_sample.json")
@@ -111,6 +116,81 @@ def test_default_repository_context_returns_one_atomic_pair() -> None:
     current_entity_repo, current_alias_repo = entity_registry.get_default_repositories()
     assert current_entity_repo is second_entity_repo
     assert current_alias_repo is second_alias_repo
+
+
+def test_resolution_repositories_fail_fast_without_explicit_audit_repositories() -> None:
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+    )
+
+    with pytest.raises(
+        RepositoryNotConfiguredError,
+        match="resolution audit repositories are not configured",
+    ):
+        init_module.get_default_resolution_repositories()
+
+
+def test_public_resolve_mention_fails_without_explicit_audit_repositories() -> None:
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+    )
+
+    with pytest.raises(
+        RepositoryNotConfiguredError,
+        match="resolution audit repositories are not configured",
+    ):
+        entity_registry.resolve_mention("贵州茅台")
+
+
+def test_reference_repository_fails_fast_without_explicit_audit_repository() -> None:
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+    )
+
+    with pytest.raises(
+        RepositoryNotConfiguredError,
+        match="reference audit repository is not configured",
+    ):
+        init_module.get_default_reference_repository()
+
+
+def test_public_register_unresolved_reference_fails_without_explicit_audit_repository() -> None:
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+    )
+
+    with pytest.raises(
+        RepositoryNotConfiguredError,
+        match="reference audit repository is not configured",
+    ):
+        entity_registry.register_unresolved_reference(
+            {
+                "reference_id": "ref-public",
+                "raw_mention_text": "Unknown Corp",
+                "source_context": {},
+            }
+        )
+
+
+def test_in_memory_audit_repositories_require_named_local_opt_in() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+
+    reference_repo, case_repo = (
+        init_module.configure_default_in_memory_audit_repositories(
+            entity_repo,
+            alias_repo,
+        )
+    )
+
+    configured = init_module.get_default_resolution_repositories()
+    assert isinstance(reference_repo, InMemoryReferenceRepository)
+    assert isinstance(case_repo, InMemoryResolutionCaseRepository)
+    assert configured == (entity_repo, alias_repo, reference_repo, case_repo)
 
 
 def test_public_initialize_uses_captured_repository_context(monkeypatch: pytest.MonkeyPatch) -> None:

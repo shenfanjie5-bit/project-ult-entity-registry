@@ -185,8 +185,8 @@ def detect_cross_listing_groups(records: list[StockBasicRecord]) -> dict[str, st
 class _RepositoryContext:
     entity_repo: EntityRepository
     alias_repo: AliasRepository
-    reference_repo: ReferenceRepository
-    case_repo: ResolutionCaseRepository
+    reference_repo: ReferenceRepository | None = None
+    case_repo: ResolutionCaseRepository | None = None
 
 
 _DEFAULT_REPOSITORY_CONTEXT: _RepositoryContext | None = None
@@ -208,25 +208,42 @@ def configure_default_repositories(
     reference_repo: ReferenceRepository | None = None,
     case_repo: ResolutionCaseRepository | None = None,
 ) -> None:
-    """Configure repositories used by public package-level APIs."""
+    """Configure repositories used by public package-level APIs.
+
+    Entity and alias repositories are enough for lookup/profile APIs. Resolution
+    APIs require explicit reference and case repositories for durable audit writes.
+    """
 
     global _DEFAULT_REPOSITORY_CONTEXT
     context = _RepositoryContext(
         entity_repo=entity_repo,
         alias_repo=alias_repo,
-        reference_repo=(
-            reference_repo
-            if reference_repo is not None
-            else InMemoryReferenceRepository()
-        ),
-        case_repo=(
-            case_repo
-            if case_repo is not None
-            else InMemoryResolutionCaseRepository()
-        ),
+        reference_repo=reference_repo,
+        case_repo=case_repo,
     )
     with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
         _DEFAULT_REPOSITORY_CONTEXT = context
+
+
+def configure_default_in_memory_audit_repositories(
+    entity_repo: EntityRepository,
+    alias_repo: AliasRepository,
+) -> tuple[InMemoryReferenceRepository, InMemoryResolutionCaseRepository]:
+    """Configure default repositories with explicit in-memory audit sinks.
+
+    This helper is for tests and local workflows only. Production resolution
+    paths should pass durable audit repositories to configure_default_repositories().
+    """
+
+    reference_repo = InMemoryReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+    return reference_repo, case_repo
 
 
 def reset_default_repositories() -> None:
@@ -267,6 +284,13 @@ def get_default_resolution_repositories() -> tuple[
     """Return all repositories used by public resolution APIs."""
 
     context = _get_default_repository_context()
+    if context.reference_repo is None or context.case_repo is None:
+        raise RepositoryNotConfiguredError(
+            "resolution audit repositories are not configured; "
+            "call configure_default_repositories(..., reference_repo=..., "
+            "case_repo=...) before using public resolution APIs, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
     return (
         context.entity_repo,
         context.alias_repo,
@@ -292,13 +316,29 @@ def get_default_alias_repository() -> AliasRepository:
 def get_default_reference_repository() -> ReferenceRepository:
     """Return the configured default reference repository."""
 
-    return _get_default_repository_context().reference_repo
+    context = _get_default_repository_context()
+    if context.reference_repo is None:
+        raise RepositoryNotConfiguredError(
+            "reference audit repository is not configured; "
+            "call configure_default_repositories(..., reference_repo=...) before "
+            "registering unresolved references, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+    return context.reference_repo
 
 
 def get_default_resolution_case_repository() -> ResolutionCaseRepository:
     """Return the configured default resolution case repository."""
 
-    return _get_default_repository_context().case_repo
+    context = _get_default_repository_context()
+    if context.case_repo is None:
+        raise RepositoryNotConfiguredError(
+            "resolution case audit repository is not configured; "
+            "call configure_default_repositories(..., case_repo=...) before "
+            "recording resolution cases, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+    return context.case_repo
 
 
 def initialize_from_stock_basic(snapshot_ref: str) -> None:
