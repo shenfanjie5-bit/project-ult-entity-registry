@@ -44,6 +44,8 @@ class ReferenceRepository(Protocol):
 
     def save(self, ref: EntityReference) -> None: ...
 
+    def delete(self, reference_id: str) -> None: ...
+
     def get(self, reference_id: str) -> EntityReference | None: ...
 
     def find_unresolved(self) -> list[EntityReference]: ...
@@ -152,6 +154,9 @@ class InMemoryReferenceRepository:
 
     def save(self, ref: EntityReference) -> None:
         self._references[ref.reference_id] = ref
+
+    def delete(self, reference_id: str) -> None:
+        self._references.pop(reference_id, None)
 
     def get(self, reference_id: str) -> EntityReference | None:
         return self._references.get(reference_id)

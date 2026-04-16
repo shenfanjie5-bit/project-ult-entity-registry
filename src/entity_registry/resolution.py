@@ -19,7 +19,6 @@ from entity_registry.references import (
     _new_case_id,
     _new_reference_id,
     record_resolution_case,
-    register_unresolved_reference_into,
 )
 from entity_registry.resolution_types import (
     MentionCandidateSet,
@@ -119,25 +118,15 @@ class DeterministicMatcher:
         """Return a deterministic decision without audit writes."""
 
         candidate_set = self.collect_candidates(raw_mention_text)
-        if candidate_set.final_status is FinalStatus.RESOLVED:
-            return ResolutionDecision(
-                selected_entity_id=candidate_set.deterministic_hits[0],
-                method=ResolutionMethod.DETERMINISTIC,
-                confidence=1.0,
-                rationale="single deterministic candidate",
-            )
+        return _decision_from_candidate_set(candidate_set)
 
-        if candidate_set.deterministic_hits:
-            rationale = "ambiguous deterministic candidates"
-        else:
-            rationale = "no deterministic candidates"
+    def resolve_candidate_set(
+        self,
+        candidate_set: MentionCandidateSet,
+    ) -> ResolutionDecision:
+        """Return a deterministic decision from a pre-collected candidate set."""
 
-        return ResolutionDecision(
-            selected_entity_id=None,
-            method=ResolutionMethod.UNRESOLVED,
-            confidence=None,
-            rationale=rationale,
-        )
+        return _decision_from_candidate_set(candidate_set)
 
     def _entities_for_aliases(
         self,
@@ -158,6 +147,32 @@ class DeterministicMatcher:
             entities_by_id[canonical_entity_id]
             for canonical_entity_id in sorted(entities_by_id)
         ]
+
+
+def _decision_from_candidate_set(
+    candidate_set: MentionCandidateSet,
+) -> ResolutionDecision:
+    """Derive a deterministic decision without re-reading candidate repositories."""
+
+    if candidate_set.final_status is FinalStatus.RESOLVED:
+        return ResolutionDecision(
+            selected_entity_id=candidate_set.deterministic_hits[0],
+            method=ResolutionMethod.DETERMINISTIC,
+            confidence=1.0,
+            rationale="single deterministic candidate",
+        )
+
+    if candidate_set.deterministic_hits:
+        rationale = "ambiguous deterministic candidates"
+    else:
+        rationale = "no deterministic candidates"
+
+    return ResolutionDecision(
+        selected_entity_id=None,
+        method=ResolutionMethod.UNRESOLVED,
+        confidence=None,
+        rationale=rationale,
+    )
 
 
 def resolve_mention(
@@ -194,7 +209,7 @@ def resolve_mention_with_repositories(
 
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates(raw_mention_text)
-    decision = matcher.resolve(raw_mention_text)
+    decision = matcher.resolve_candidate_set(candidate_set)
     source_context = _source_context_from(context)
 
     if decision.selected_entity_id is not None:
@@ -206,17 +221,19 @@ def resolve_mention_with_repositories(
             resolution_method=decision.method,
             resolution_confidence=decision.confidence,
         )
-        reference_repo.save(reference)
-        record_resolution_case(
-            ResolutionCase(
-                case_id=_new_case_id(),
-                reference_id=reference.reference_id,
-                candidate_entity_ids=candidate_set.deterministic_hits,
-                selected_entity_id=decision.selected_entity_id,
-                decision_type=DecisionType.AUTO,
-                decision_rationale=decision.rationale,
-            ),
-            case_repo,
+        case = ResolutionCase(
+            case_id=_new_case_id(),
+            reference_id=reference.reference_id,
+            candidate_entity_ids=candidate_set.deterministic_hits,
+            selected_entity_id=decision.selected_entity_id,
+            decision_type=DecisionType.AUTO,
+            decision_rationale=decision.rationale,
+        )
+        _save_resolution_audit(
+            reference,
+            case,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
         )
         return MentionResolutionResult(
             raw_mention_text=raw_mention_text,
@@ -225,28 +242,31 @@ def resolve_mention_with_repositories(
             resolution_confidence=decision.confidence,
         )
 
-    reference = register_unresolved_reference_into(
-        {
-            "reference_id": _new_reference_id(),
-            "raw_mention_text": raw_mention_text,
-            "source_context": source_context,
-        },
-        reference_repo,
+    reference = EntityReference(
+        reference_id=_new_reference_id(),
+        raw_mention_text=raw_mention_text,
+        source_context=source_context,
+        resolved_entity_id=None,
+        resolution_method=ResolutionMethod.UNRESOLVED,
+        resolution_confidence=None,
     )
-    record_resolution_case(
-        ResolutionCase(
-            case_id=_new_case_id(),
-            reference_id=reference.reference_id,
-            candidate_entity_ids=candidate_set.deterministic_hits,
-            selected_entity_id=None,
-            decision_type=(
-                DecisionType.MANUAL_REVIEW
-                if candidate_set.deterministic_hits
-                else DecisionType.AUTO
-            ),
-            decision_rationale=decision.rationale,
+    case = ResolutionCase(
+        case_id=_new_case_id(),
+        reference_id=reference.reference_id,
+        candidate_entity_ids=candidate_set.deterministic_hits,
+        selected_entity_id=None,
+        decision_type=(
+            DecisionType.MANUAL_REVIEW
+            if candidate_set.deterministic_hits
+            else DecisionType.AUTO
         ),
-        case_repo,
+        decision_rationale=decision.rationale,
+    )
+    _save_resolution_audit(
+        reference,
+        case,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
     )
     return MentionResolutionResult(
         raw_mention_text=raw_mention_text,
@@ -254,6 +274,21 @@ def resolve_mention_with_repositories(
         resolution_method=ResolutionMethod.UNRESOLVED,
         resolution_confidence=None,
     )
+
+
+def _save_resolution_audit(
+    reference: EntityReference,
+    case: ResolutionCase,
+    *,
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+) -> None:
+    reference_repo.save(reference)
+    try:
+        record_resolution_case(case, case_repo)
+    except Exception:
+        reference_repo.delete(reference.reference_id)
+        raise
 
 
 def _source_context_from(

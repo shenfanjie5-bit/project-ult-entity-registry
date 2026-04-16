@@ -241,6 +241,16 @@ def test_in_memory_reference_repository_saves_and_gets_reference() -> None:
     assert repository.get("ref-1") == reference
 
 
+def test_in_memory_reference_repository_deletes_reference() -> None:
+    repository = InMemoryReferenceRepository()
+    reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+
+    repository.save(reference)
+    repository.delete("ref-1")
+
+    assert repository.get("ref-1") is None
+
+
 def test_in_memory_reference_repository_returns_none_for_missing_reference() -> None:
     repository = InMemoryReferenceRepository()
 

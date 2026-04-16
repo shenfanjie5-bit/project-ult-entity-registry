@@ -6,7 +6,15 @@ import pytest
 from pydantic import ValidationError
 
 import entity_registry
-from entity_registry.core import DecisionType, ResolutionMethod
+from entity_registry.core import (
+    AliasType,
+    CanonicalEntity,
+    DecisionType,
+    EntityAlias,
+    EntityStatus,
+    EntityType,
+    ResolutionMethod,
+)
 from entity_registry.init import (
     FileStockBasicSnapshotReader,
     initialize_from_stock_basic_into,
@@ -129,6 +137,38 @@ def test_unique_deterministic_hit_returns_result_and_audit_records() -> None:
     assert cases[0].selected_entity_id == "ENT_STOCK_600519.SH"
 
 
+def test_resolve_mention_audits_same_candidate_snapshot_used_for_decision() -> None:
+    entity_repo = InMemoryEntityRepository()
+    first_entity = make_entity("ENT_STOCK_FIRST.SZ")
+    second_entity = make_entity("ENT_STOCK_SECOND.SZ")
+    entity_repo.save(first_entity)
+    entity_repo.save(second_entity)
+    alias_repo = FlappingAliasRepository(
+        [
+            make_alias(first_entity.canonical_entity_id, "flip"),
+            make_alias(second_entity.canonical_entity_id, "flip"),
+        ]
+    )
+    reference_repo = InMemoryReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+
+    result = resolve_mention_with_repositories(
+        "flip",
+        None,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,  # type: ignore[arg-type]
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    references = saved_references(reference_repo)
+    cases = case_repo.find_by_reference(references[0].reference_id)
+    assert alias_repo.find_by_text_calls == 1
+    assert result.resolved_entity_id == "ENT_STOCK_FIRST.SZ"
+    assert cases[0].selected_entity_id == "ENT_STOCK_FIRST.SZ"
+    assert cases[0].candidate_entity_ids == ["ENT_STOCK_FIRST.SZ"]
+
+
 def test_unique_code_hit_returns_deterministic_result() -> None:
     entity_repo, alias_repo, reference_repo, case_repo = (
         initialized_resolution_repositories()
@@ -232,8 +272,103 @@ def test_public_resolve_mention_uses_configured_default_repositories() -> None:
     assert references[0].source_context["source_type"] == "announcement"
 
 
+def test_resolved_case_write_failure_rolls_back_reference() -> None:
+    entity_repo, alias_repo, reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+
+    with pytest.raises(RuntimeError, match="case write failed"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=FailingResolutionCaseRepository(),
+        )
+
+    assert saved_references(reference_repo) == []
+    assert reference_repo.find_unresolved() == []
+
+
+def test_unresolved_case_write_failure_rolls_back_reference() -> None:
+    entity_repo, alias_repo, reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+
+    with pytest.raises(RuntimeError, match="case write failed"):
+        resolve_mention_with_repositories(
+            "不存在的公司",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=FailingResolutionCaseRepository(),
+        )
+
+    assert saved_references(reference_repo) == []
+    assert reference_repo.find_unresolved() == []
+
+
 def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
     text = Path("src/entity_registry/resolution.py").read_text(encoding="utf-8")
 
     for forbidden in ("openai", "anthropic", "google.generativeai", "splink", "hanlp"):
         assert forbidden not in text
+
+
+def make_entity(entity_id: str) -> CanonicalEntity:
+    return CanonicalEntity(
+        canonical_entity_id=entity_id,
+        entity_type=EntityType.STOCK,
+        display_name=entity_id,
+        status=EntityStatus.ACTIVE,
+        anchor_code=entity_id.removeprefix("ENT_STOCK_"),
+        cross_listing_group=None,
+    )
+
+
+def make_alias(entity_id: str, alias_text: str) -> EntityAlias:
+    return EntityAlias(
+        canonical_entity_id=entity_id,
+        alias_text=alias_text,
+        alias_type=AliasType.SHORT_NAME,
+        confidence=1.0,
+        source="unit-test",
+        is_primary=True,
+    )
+
+
+class FlappingAliasRepository:
+    def __init__(self, aliases_by_call: list[EntityAlias]) -> None:
+        self.aliases_by_call = aliases_by_call
+        self.find_by_text_calls = 0
+
+    def find_by_text(self, alias_text: str) -> list[EntityAlias]:
+        index = min(self.find_by_text_calls, len(self.aliases_by_call) - 1)
+        self.find_by_text_calls += 1
+        return [self.aliases_by_call[index]]
+
+    def find_by_entity(self, entity_id: str) -> list[EntityAlias]:
+        return [
+            alias
+            for alias in self.aliases_by_call
+            if alias.canonical_entity_id == entity_id
+        ]
+
+    def save(self, alias: EntityAlias) -> None:
+        raise NotImplementedError
+
+    def save_if_absent(self, alias: EntityAlias) -> bool:
+        raise NotImplementedError
+
+    def save_batch(self, aliases: list[EntityAlias]) -> None:
+        raise NotImplementedError
+
+    def save_batch_if_absent(self, aliases: list[EntityAlias]) -> int:
+        raise NotImplementedError
+
+
+class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
+    def save(self, case: entity_registry.ResolutionCase) -> None:
+        raise RuntimeError("case write failed")
