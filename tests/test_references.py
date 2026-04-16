@@ -125,9 +125,6 @@ def test_register_unresolved_reference_into_saves_normalized_reference() -> None
             "reference_id": "ref-unresolved",
             "raw_mention_text": "Unknown Corp",
             "source_context": {"source": "fixture"},
-            "resolved_entity_id": "ENT_STOCK_300750.SZ",
-            "resolution_method": ResolutionMethod.DETERMINISTIC,
-            "resolution_confidence": 1.0,
         },
         repository,
     )
@@ -136,6 +133,31 @@ def test_register_unresolved_reference_into_saves_normalized_reference() -> None
     assert reference.resolved_entity_id is None
     assert reference.resolution_method is ResolutionMethod.UNRESOLVED
     assert reference.resolution_confidence is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"resolved_entity_id": "ENT_STOCK_300750.SZ"},
+        {"resolution_method": ResolutionMethod.DETERMINISTIC},
+        {"resolution_confidence": 1.0},
+    ],
+)
+def test_register_unresolved_reference_into_rejects_conflicting_payload(
+    payload: dict[str, object],
+) -> None:
+    repository = InMemoryReferenceRepository()
+    base_payload = {
+        "reference_id": "ref-conflict",
+        "raw_mention_text": "Unknown Corp",
+        "source_context": {"source": "fixture"},
+    }
+    base_payload.update(payload)
+
+    with pytest.raises(ValueError):
+        register_unresolved_reference_into(base_payload, repository)
+
+    assert repository.get("ref-conflict") is None
 
 
 def test_public_register_unresolved_reference_uses_configured_repository() -> None:

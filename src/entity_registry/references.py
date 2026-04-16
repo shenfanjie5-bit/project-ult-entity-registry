@@ -108,11 +108,28 @@ def _coerce_unresolved_reference(
         return reference
 
     payload = dict(reference)
+    if payload.get("resolved_entity_id") is not None:
+        raise ValueError(
+            "unresolved reference payload must not include resolved_entity_id"
+        )
+
+    resolution_method = payload.get("resolution_method")
+    if (
+        resolution_method is not None
+        and ResolutionMethod(resolution_method) is not ResolutionMethod.UNRESOLVED
+    ):
+        raise ValueError(
+            "unresolved reference payload must use resolution_method='unresolved'"
+        )
+
+    if payload.get("resolution_confidence") is not None:
+        raise ValueError("unresolved reference payload must not include confidence")
+
     payload.setdefault("reference_id", _new_reference_id())
     payload.setdefault("source_context", {})
-    payload["resolved_entity_id"] = None
-    payload["resolution_method"] = ResolutionMethod.UNRESOLVED
-    payload["resolution_confidence"] = None
+    payload.setdefault("resolved_entity_id", None)
+    payload.setdefault("resolution_method", ResolutionMethod.UNRESOLVED)
+    payload.setdefault("resolution_confidence", None)
     return EntityReference.model_validate(payload)
 
 

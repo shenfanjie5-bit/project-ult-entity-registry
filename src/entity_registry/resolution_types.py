@@ -19,6 +19,7 @@ class MentionCandidateSet(BaseModel):
     raw_mention_text: str
     deterministic_hits: list[str]
     fuzzy_hits: list[str]
+    fuzzy_scores: dict[str, float] = Field(default_factory=dict, exclude=True)
     llm_required: bool
     final_status: FinalStatus
 

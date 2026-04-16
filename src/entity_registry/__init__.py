@@ -17,6 +17,13 @@ from entity_registry.aliases import (
     generate_aliases_from_stock_basic,
     lookup_alias,
 )
+from entity_registry.fuzzy import (
+    FuzzyCandidate,
+    FuzzyMatcher,
+    FuzzyMatcherUnavailable,
+    NullFuzzyMatcher,
+    SplinkFuzzyMatcher,
+)
 from entity_registry.init import (
     DataPlatformStockBasicReader,
     FileStockBasicSnapshotReader,
@@ -25,6 +32,7 @@ from entity_registry.init import (
     RepositoryNotConfiguredError,
     StockBasicRecord,
     StockBasicSnapshotReader,
+    configure_default_in_memory_audit_repositories,
     configure_default_repositories,
     detect_cross_listing_groups,
     get_default_alias_repository,
@@ -34,6 +42,12 @@ from entity_registry.init import (
     initialize_from_stock_basic_into,
     load_stock_basic_records,
     reset_default_repositories,
+)
+from entity_registry.ner import (
+    ExtractedMention,
+    HanLPNERExtractor,
+    NERExtractor,
+    NullNERExtractor,
 )
 from entity_registry.profile import (
     CanonicalEntityProfile,
@@ -76,13 +90,21 @@ __all__ = [
     "EntityReference",
     "EntityStatus",
     "EntityType",
+    "ExtractedMention",
     "FileStockBasicSnapshotReader",
     "FinalStatus",
+    "FuzzyCandidate",
+    "FuzzyMatcher",
+    "FuzzyMatcherUnavailable",
+    "HanLPNERExtractor",
     "InMemoryResolutionCaseRepository",
     "InitializationError",
     "InitializationResult",
     "MentionCandidateSet",
     "MentionResolutionResult",
+    "NERExtractor",
+    "NullFuzzyMatcher",
+    "NullNERExtractor",
     "RepositoryNotConfiguredError",
     "ResolutionCase",
     "ResolutionCaseRepository",
@@ -91,6 +113,8 @@ __all__ = [
     "ResolutionMethod",
     "StockBasicRecord",
     "StockBasicSnapshotReader",
+    "SplinkFuzzyMatcher",
+    "configure_default_in_memory_audit_repositories",
     "configure_default_repositories",
     "detect_cross_listing_groups",
     "generate_aliases_from_stock_basic",

@@ -6,6 +6,8 @@ from entity_registry.core import (
     AliasType,
     CanonicalEntity,
     EntityAlias,
+    EntityStatus,
+    EntityType,
     FinalStatus,
     ResolutionMethod,
 )
@@ -144,6 +146,58 @@ def test_collect_candidates_marks_a_h_shared_short_name_for_manual_review() -> N
     }
     assert candidate_set.final_status is FinalStatus.MANUAL_REVIEW
     assert candidate_set.llm_required is True
+
+
+def test_collect_candidates_prefers_direct_ts_code_over_generic_alias_collision() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    colliding_entity = CanonicalEntity(
+        canonical_entity_id="ENT_STOCK_999998.SZ",
+        entity_type=EntityType.STOCK,
+        display_name="Collision",
+        status=EntityStatus.ACTIVE,
+        anchor_code="999998.SZ",
+    )
+    entity_repo.save(colliding_entity)
+    alias_repo.save(
+        make_alias(
+            entity_id=colliding_entity.canonical_entity_id,
+            alias_text="600519.SH",
+            alias_type=AliasType.SHORT_NAME,
+        )
+    )
+
+    candidate_set = DeterministicMatcher(entity_repo, alias_repo).collect_candidates(
+        "600519.SH"
+    )
+
+    assert candidate_set.deterministic_hits == ["ENT_STOCK_600519.SH"]
+    assert candidate_set.final_status is FinalStatus.RESOLVED
+
+
+def test_collect_candidates_prefers_code_alias_over_generic_alias_collision() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    colliding_entity = CanonicalEntity(
+        canonical_entity_id="ENT_STOCK_999999.SZ",
+        entity_type=EntityType.STOCK,
+        display_name="Collision",
+        status=EntityStatus.ACTIVE,
+        anchor_code="999999.SZ",
+    )
+    entity_repo.save(colliding_entity)
+    alias_repo.save(
+        make_alias(
+            entity_id=colliding_entity.canonical_entity_id,
+            alias_text="600519",
+            alias_type=AliasType.SHORT_NAME,
+        )
+    )
+
+    candidate_set = DeterministicMatcher(entity_repo, alias_repo).collect_candidates(
+        "600519"
+    )
+
+    assert candidate_set.deterministic_hits == ["ENT_STOCK_600519.SH"]
+    assert candidate_set.final_status is FinalStatus.RESOLVED
 
 
 def test_resolve_returns_deterministic_decision_for_unique_hit() -> None:

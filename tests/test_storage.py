@@ -14,6 +14,7 @@ from entity_registry.storage import (
     InMemoryAliasRepository,
     InMemoryEntityRepository,
     InMemoryReferenceRepository,
+    InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
     ResolutionCaseRepository,
@@ -146,6 +147,7 @@ def test_alias_repository_protocol_is_usable_for_in_memory() -> None:
     repository: AliasRepository = InMemoryAliasRepository()
 
     assert repository.find_by_text("missing") == []
+    assert repository.list_all() == []
 
 
 def test_in_memory_alias_repository_finds_by_text() -> None:
@@ -164,6 +166,19 @@ def test_in_memory_alias_repository_finds_by_entity() -> None:
     repository.save(alias)
 
     assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [alias]
+
+
+def test_in_memory_alias_repository_lists_all_aliases_without_exposing_index() -> None:
+    repository = InMemoryAliasRepository()
+    short_name = make_alias(alias_text="CATL")
+    code = make_alias(alias_text="300750")
+
+    repository.save_batch([short_name, code])
+    aliases = repository.list_all()
+    aliases.clear()
+
+    assert repository.list_all() == [short_name, code]
+    assert repository.find_by_entity("ENT_STOCK_300750.SZ") == [short_name, code]
 
 
 def test_in_memory_alias_repository_returns_empty_lists_for_missing_keys() -> None:
@@ -278,6 +293,18 @@ def test_in_memory_reference_repository_upserts_by_reference_id() -> None:
 
     assert repository.get("ref-1") == resolved
     assert repository.find_unresolved() == []
+
+
+def test_in_memory_resolution_audit_reference_repository_saves_reference_and_case() -> None:
+    case_repo = InMemoryResolutionCaseRepository()
+    repository = InMemoryResolutionAuditReferenceRepository(case_repo)
+    reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+    case = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+
+    repository.save_resolution(reference, case)
+
+    assert repository.get("ref-1") == reference
+    assert case_repo.get("case-1") == case
 
 
 def test_resolution_case_repository_protocol_is_usable_for_in_memory() -> None:

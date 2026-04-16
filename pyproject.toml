@@ -16,6 +16,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+ner = [
+    "hanlp>=2.1",
+]
+fuzzy = [
+    "splink>=4.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

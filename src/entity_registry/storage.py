@@ -30,6 +30,8 @@ class AliasRepository(Protocol):
 
     def find_by_entity(self, entity_id: str) -> list[EntityAlias]: ...
 
+    def list_all(self) -> list[EntityAlias]: ...
+
     def save(self, alias: EntityAlias) -> None: ...
 
     def save_if_absent(self, alias: EntityAlias) -> bool: ...
@@ -109,6 +111,14 @@ class InMemoryAliasRepository:
         with self._lock:
             return list(self._by_entity.get(entity_id, []))
 
+    def list_all(self) -> list[EntityAlias]:
+        with self._lock:
+            return [
+                alias
+                for entity_aliases in self._by_entity.values()
+                for alias in entity_aliases
+            ]
+
     def save(self, alias: EntityAlias) -> None:
         self.save_if_absent(alias)
 
@@ -167,6 +177,22 @@ class InMemoryReferenceRepository:
             for ref in self._references.values()
             if ref.resolved_entity_id is None
         ]
+
+
+class InMemoryResolutionAuditReferenceRepository(InMemoryReferenceRepository):
+    """In-memory reference repository with native resolution-case audit writes."""
+
+    def __init__(self, case_repo: ResolutionCaseRepository) -> None:
+        super().__init__()
+        self._case_repo = case_repo
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        self.save(reference)
+        self._case_repo.save(case)
 
 
 class InMemoryResolutionCaseRepository:
