@@ -21,6 +21,7 @@ from entity_registry.init import (
 )
 from entity_registry.references import EntityReference
 from entity_registry.resolution import (
+    ResolutionAuditRepositoryRequiredError,
     resolve_mention,
     resolve_mention_with_repositories,
 )
@@ -51,8 +52,8 @@ def initialized_resolution_repositories() -> tuple[
 ]:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
-    reference_repo = InMemoryReferenceRepository()
     case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo)
     result = initialize_from_stock_basic_into(
         str(FIXTURE_PATH),
         entity_repo,
@@ -149,8 +150,8 @@ def test_resolve_mention_audits_same_candidate_snapshot_used_for_decision() -> N
             make_alias(second_entity.canonical_entity_id, "flip"),
         ]
     )
-    reference_repo = InMemoryReferenceRepository()
     case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo)
 
     result = resolve_mention_with_repositories(
         "flip",
@@ -272,42 +273,74 @@ def test_public_resolve_mention_uses_configured_default_repositories() -> None:
     assert references[0].source_context["source_type"] == "announcement"
 
 
-def test_resolved_case_write_failure_rolls_back_reference() -> None:
-    entity_repo, alias_repo, reference_repo, _case_repo = (
+def test_resolved_resolution_requires_native_audit_unit_of_work() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
+    reference_repo = AppendTrackingReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
 
-    with pytest.raises(RuntimeError, match="case write failed"):
+    with pytest.raises(
+        ResolutionAuditRepositoryRequiredError,
+        match="save_resolution",
+    ):
         resolve_mention_with_repositories(
             "贵州茅台",
             None,
             entity_repo=entity_repo,
             alias_repo=alias_repo,
             reference_repo=reference_repo,
-            case_repo=FailingResolutionCaseRepository(),
+            case_repo=case_repo,
         )
 
-    assert saved_references(reference_repo) == []
-    assert reference_repo.find_unresolved() == []
+    assert reference_repo.saved_records == []
+    assert case_repo.find_by_reference("any") == []
 
 
-def test_unresolved_case_write_failure_rolls_back_reference() -> None:
-    entity_repo, alias_repo, reference_repo, _case_repo = (
+def test_unresolved_resolution_requires_native_audit_unit_of_work() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
+    reference_repo = AppendTrackingReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
 
-    with pytest.raises(RuntimeError, match="case write failed"):
+    with pytest.raises(
+        ResolutionAuditRepositoryRequiredError,
+        match="save_resolution",
+    ):
         resolve_mention_with_repositories(
             "不存在的公司",
             None,
             entity_repo=entity_repo,
             alias_repo=alias_repo,
             reference_repo=reference_repo,
-            case_repo=FailingResolutionCaseRepository(),
+            case_repo=case_repo,
         )
 
-    assert saved_references(reference_repo) == []
-    assert reference_repo.find_unresolved() == []
+    assert reference_repo.saved_records == []
+    assert case_repo.find_by_reference("any") == []
+
+
+def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    reference_repo = NativeResolutionAuditReferenceRepository()
+
+    result = resolve_mention_with_repositories(
+        "贵州茅台",
+        None,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        reference_repo=reference_repo,
+        case_repo=UnexpectedResolutionCaseRepository(),
+    )
+
+    references = saved_references(reference_repo)
+    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert len(references) == 1
+    assert len(reference_repo.saved_cases) == 1
+    assert reference_repo.saved_cases[0].reference_id == references[0].reference_id
 
 
 def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
@@ -369,6 +402,36 @@ class FlappingAliasRepository:
         raise NotImplementedError
 
 
-class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
+class UnexpectedResolutionCaseRepository(InMemoryResolutionCaseRepository):
     def save(self, case: entity_registry.ResolutionCase) -> None:
-        raise RuntimeError("case write failed")
+        raise AssertionError("native audit unit of work should save cases")
+
+
+class AppendTrackingReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved_records: list[EntityReference] = []
+
+    def save(self, ref: EntityReference) -> None:
+        self.saved_records.append(ref)
+        super().save(ref)
+
+
+class NativeResolutionAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(
+        self,
+        case_repo: InMemoryResolutionCaseRepository | None = None,
+    ) -> None:
+        super().__init__()
+        self.saved_cases: list[entity_registry.ResolutionCase] = []
+        self.case_repo = case_repo
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.save(reference)
+        if self.case_repo is not None:
+            self.case_repo.save(case)
+        self.saved_cases.append(case)
