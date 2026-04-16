@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -228,6 +229,48 @@ def test_initialize_from_stock_basic_is_idempotent() -> None:
     assert len(entity_repo.list_all()) == 24
 
 
+def test_initialize_from_stock_basic_uses_atomic_entity_insert() -> None:
+    entity_repo = NoExistsEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+
+    result = initialize_from_stock_basic(str(FIXTURE_PATH), entity_repo, alias_repo)
+
+    assert result.entities_created == 24
+    assert len(entity_repo.list_all()) == 24
+
+
+def test_initialize_from_stock_basic_is_idempotent_under_concurrent_runs() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                lambda _: initialize_from_stock_basic(
+                    str(FIXTURE_PATH),
+                    entity_repo,
+                    alias_repo,
+                ),
+                range(4),
+            )
+        )
+
+    assert sum(result.entities_created for result in results) == 24
+    assert len(entity_repo.list_all()) == 24
+
+    stored_aliases = [
+        alias
+        for entity in entity_repo.list_all()
+        for alias in alias_repo.find_by_entity(entity.canonical_entity_id)
+    ]
+    semantic_keys = {
+        (alias.canonical_entity_id, alias.alias_text, alias.alias_type)
+        for alias in stored_aliases
+    }
+    assert len(stored_aliases) == len(semantic_keys)
+    assert sum(result.aliases_created for result in results) == len(stored_aliases)
+
+
 def test_initialize_from_stock_basic_keeps_a_and_h_independent_but_linked() -> None:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
@@ -307,3 +350,8 @@ def make_minimal_record_payload(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+class NoExistsEntityRepository(InMemoryEntityRepository):
+    def exists(self, entity_id: str) -> bool:
+        raise AssertionError(f"exists() should not be used for {entity_id}")

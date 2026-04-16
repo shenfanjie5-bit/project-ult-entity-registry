@@ -71,22 +71,12 @@ class AliasManager:
     def add_alias(self, alias: EntityAlias) -> None:
         """Add one alias unless the same entity/text/type mapping already exists."""
 
-        if self._has_semantic_duplicate(alias):
-            return
-
-        self._alias_repo.save(alias)
+        self._alias_repo.save_if_absent(alias)
 
     def add_aliases_batch(self, aliases: list[EntityAlias]) -> int:
         """Add aliases and return the number of newly stored mappings."""
 
-        created = 0
-        for alias in aliases:
-            if self._has_semantic_duplicate(alias):
-                continue
-            self._alias_repo.save(alias)
-            created += 1
-
-        return created
+        return self._alias_repo.save_batch_if_absent(aliases)
 
     def lookup(self, alias_text: str) -> list[EntityAlias]:
         """Return exact text matches for an alias."""
@@ -97,11 +87,3 @@ class AliasManager:
         """Return all aliases attached to one canonical entity."""
 
         return self._alias_repo.find_by_entity(canonical_entity_id)
-
-    def _has_semantic_duplicate(self, alias: EntityAlias) -> bool:
-        return any(
-            existing.canonical_entity_id == alias.canonical_entity_id
-            and existing.alias_text == alias.alias_text
-            and existing.alias_type == alias.alias_type
-            for existing in self._alias_repo.find_by_text(alias.alias_text)
-        )

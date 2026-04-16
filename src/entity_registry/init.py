@@ -122,17 +122,16 @@ def initialize_from_stock_basic(
     for record in records:
         try:
             canonical_entity_id = generate_stock_entity_id(record.ts_code)
-            if not entity_repo.exists(canonical_entity_id):
-                entity_repo.save(
-                    CanonicalEntity(
-                        canonical_entity_id=canonical_entity_id,
-                        entity_type=EntityType.STOCK,
-                        display_name=record.name,
-                        status=_entity_status_from_list_status(record.list_status),
-                        anchor_code=record.ts_code,
-                        cross_listing_group=cross_listing_groups.get(record.ts_code),
-                    )
+            if entity_repo.save_if_absent(
+                CanonicalEntity(
+                    canonical_entity_id=canonical_entity_id,
+                    entity_type=EntityType.STOCK,
+                    display_name=record.name,
+                    status=_entity_status_from_list_status(record.list_status),
+                    anchor_code=record.ts_code,
+                    cross_listing_group=cross_listing_groups.get(record.ts_code),
                 )
+            ):
                 entities_created += 1
 
             aliases_created += alias_manager.add_aliases_batch(
