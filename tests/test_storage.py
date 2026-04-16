@@ -1,19 +1,22 @@
 from entity_registry.core import (
     AliasType,
     CanonicalEntity,
+    DecisionType,
     EntityAlias,
     EntityStatus,
     EntityType,
     ResolutionMethod,
 )
-from entity_registry.references import EntityReference
+from entity_registry.references import EntityReference, ResolutionCase
 from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
     InMemoryAliasRepository,
     InMemoryEntityRepository,
     InMemoryReferenceRepository,
+    InMemoryResolutionCaseRepository,
     ReferenceRepository,
+    ResolutionCaseRepository,
 )
 
 
@@ -57,6 +60,29 @@ def make_reference(
             else ResolutionMethod.UNRESOLVED
         ),
         resolution_confidence=1.0 if resolved_entity_id else None,
+    )
+
+
+def make_case(
+    case_id: str,
+    reference_id: str,
+    selected_entity_id: str | None,
+) -> ResolutionCase:
+    return ResolutionCase(
+        case_id=case_id,
+        reference_id=reference_id,
+        candidate_entity_ids=(
+            [selected_entity_id]
+            if selected_entity_id is not None
+            else []
+        ),
+        selected_entity_id=selected_entity_id,
+        decision_type=(
+            DecisionType.AUTO
+            if selected_entity_id is not None
+            else DecisionType.MANUAL_REVIEW
+        ),
+        decision_rationale="unit-test",
     )
 
 
@@ -242,3 +268,49 @@ def test_in_memory_reference_repository_upserts_by_reference_id() -> None:
 
     assert repository.get("ref-1") == resolved
     assert repository.find_unresolved() == []
+
+
+def test_resolution_case_repository_protocol_is_usable_for_in_memory() -> None:
+    repository: ResolutionCaseRepository = InMemoryResolutionCaseRepository()
+
+    assert repository.find_by_reference("missing") == []
+
+
+def test_in_memory_resolution_case_repository_saves_and_gets_case() -> None:
+    repository = InMemoryResolutionCaseRepository()
+    case = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+
+    repository.save(case)
+
+    assert repository.get("case-1") == case
+
+
+def test_in_memory_resolution_case_repository_returns_none_for_missing_case() -> None:
+    repository = InMemoryResolutionCaseRepository()
+
+    assert repository.get("missing") is None
+
+
+def test_in_memory_resolution_case_repository_finds_by_reference() -> None:
+    repository = InMemoryResolutionCaseRepository()
+    first = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+    second = make_case("case-2", "ref-1", None)
+    other = make_case("case-3", "ref-2", "ENT_STOCK_600519.SH")
+
+    repository.save(first)
+    repository.save(second)
+    repository.save(other)
+
+    assert repository.find_by_reference("ref-1") == [first, second]
+
+
+def test_in_memory_resolution_case_repository_upserts_by_case_id() -> None:
+    repository = InMemoryResolutionCaseRepository()
+    original = make_case("case-1", "ref-1", None)
+    updated = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+
+    repository.save(original)
+    repository.save(updated)
+
+    assert repository.get("case-1") == updated
+    assert repository.find_by_reference("ref-1") == [updated]

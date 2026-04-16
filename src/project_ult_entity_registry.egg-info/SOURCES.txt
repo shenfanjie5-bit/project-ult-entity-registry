@@ -4,6 +4,7 @@ src/entity_registry/__init__.py
 src/entity_registry/aliases.py
 src/entity_registry/core.py
 src/entity_registry/init.py
+src/entity_registry/profile.py
 src/entity_registry/references.py
 src/entity_registry/resolution.py
 src/entity_registry/resolution_types.py
@@ -16,6 +17,8 @@ src/project_ult_entity_registry.egg-info/top_level.txt
 tests/test_aliases.py
 tests/test_core.py
 tests/test_init.py
+tests/test_profile.py
 tests/test_references.py
 tests/test_resolution_deterministic.py
+tests/test_resolution_resolve_mention.py
 tests/test_storage.py

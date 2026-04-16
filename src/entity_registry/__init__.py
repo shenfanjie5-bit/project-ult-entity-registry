@@ -35,13 +35,29 @@ from entity_registry.init import (
     load_stock_basic_records,
     reset_default_repositories,
 )
-from entity_registry.references import EntityReference, ResolutionCase
-from entity_registry.resolution import DeterministicMatcher
+from entity_registry.profile import (
+    CanonicalEntityProfile,
+    get_entity_profile,
+)
+from entity_registry.references import (
+    EntityReference,
+    ResolutionCase,
+    register_unresolved_reference,
+)
+from entity_registry.resolution import (
+    DeterministicMatcher,
+    resolve_mention,
+)
 from entity_registry.resolution_types import (
     BatchResolutionJob,
     MentionCandidateSet,
+    MentionResolutionResult,
     ResolutionContext,
     ResolutionDecision,
+)
+from entity_registry.storage import (
+    InMemoryResolutionCaseRepository,
+    ResolutionCaseRepository,
 )
 
 __version__ = "0.1.0"
@@ -52,6 +68,7 @@ __all__ = [
     "AliasManager",
     "BatchResolutionJob",
     "CanonicalEntity",
+    "CanonicalEntityProfile",
     "DataPlatformStockBasicReader",
     "DecisionType",
     "DeterministicMatcher",
@@ -61,11 +78,14 @@ __all__ = [
     "EntityType",
     "FileStockBasicSnapshotReader",
     "FinalStatus",
+    "InMemoryResolutionCaseRepository",
     "InitializationError",
     "InitializationResult",
     "MentionCandidateSet",
+    "MentionResolutionResult",
     "RepositoryNotConfiguredError",
     "ResolutionCase",
+    "ResolutionCaseRepository",
     "ResolutionContext",
     "ResolutionDecision",
     "ResolutionMethod",
@@ -78,10 +98,13 @@ __all__ = [
     "get_default_alias_repository",
     "get_default_entity_repository",
     "get_default_repositories",
+    "get_entity_profile",
     "initialize_from_stock_basic",
     "initialize_from_stock_basic_into",
     "load_stock_basic_records",
     "lookup_alias",
+    "register_unresolved_reference",
     "reset_default_repositories",
+    "resolve_mention",
     "validate_entity_id",
 ]

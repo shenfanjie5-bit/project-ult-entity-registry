@@ -26,6 +26,10 @@ from entity_registry.core import (
 from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
+    InMemoryReferenceRepository,
+    InMemoryResolutionCaseRepository,
+    ReferenceRepository,
+    ResolutionCaseRepository,
 )
 
 
@@ -181,6 +185,8 @@ def detect_cross_listing_groups(records: list[StockBasicRecord]) -> dict[str, st
 class _RepositoryContext:
     entity_repo: EntityRepository
     alias_repo: AliasRepository
+    reference_repo: ReferenceRepository
+    case_repo: ResolutionCaseRepository
 
 
 _DEFAULT_REPOSITORY_CONTEXT: _RepositoryContext | None = None
@@ -198,11 +204,27 @@ class _PreparedInitialization:
 def configure_default_repositories(
     entity_repo: EntityRepository,
     alias_repo: AliasRepository,
+    *,
+    reference_repo: ReferenceRepository | None = None,
+    case_repo: ResolutionCaseRepository | None = None,
 ) -> None:
     """Configure repositories used by public package-level APIs."""
 
     global _DEFAULT_REPOSITORY_CONTEXT
-    context = _RepositoryContext(entity_repo=entity_repo, alias_repo=alias_repo)
+    context = _RepositoryContext(
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        reference_repo=(
+            reference_repo
+            if reference_repo is not None
+            else InMemoryReferenceRepository()
+        ),
+        case_repo=(
+            case_repo
+            if case_repo is not None
+            else InMemoryResolutionCaseRepository()
+        ),
+    )
     with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
         _DEFAULT_REPOSITORY_CONTEXT = context
 
@@ -218,16 +240,39 @@ def reset_default_repositories() -> None:
 def get_default_repositories() -> tuple[EntityRepository, AliasRepository]:
     """Return the configured default repository pair from one context snapshot."""
 
+    context = _get_default_repository_context()
+    return context.entity_repo, context.alias_repo
+
+
+def _get_default_repository_context() -> _RepositoryContext:
+    """Return the configured repository context from one atomic snapshot."""
+
     with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
         context = _DEFAULT_REPOSITORY_CONTEXT
 
     if context is None:
         raise RepositoryNotConfiguredError(
             "entity-registry repositories are not configured; "
-            "call configure_default_repositories() before using public initialization "
-            "or lookup APIs",
+            "call configure_default_repositories() before using public APIs",
         )
-    return context.entity_repo, context.alias_repo
+    return context
+
+
+def get_default_resolution_repositories() -> tuple[
+    EntityRepository,
+    AliasRepository,
+    ReferenceRepository,
+    ResolutionCaseRepository,
+]:
+    """Return all repositories used by public resolution APIs."""
+
+    context = _get_default_repository_context()
+    return (
+        context.entity_repo,
+        context.alias_repo,
+        context.reference_repo,
+        context.case_repo,
+    )
 
 
 def get_default_entity_repository() -> EntityRepository:
@@ -242,6 +287,18 @@ def get_default_alias_repository() -> AliasRepository:
 
     _, alias_repo = get_default_repositories()
     return alias_repo
+
+
+def get_default_reference_repository() -> ReferenceRepository:
+    """Return the configured default reference repository."""
+
+    return _get_default_repository_context().reference_repo
+
+
+def get_default_resolution_case_repository() -> ResolutionCaseRepository:
+    """Return the configured default resolution case repository."""
+
+    return _get_default_repository_context().case_repo
 
 
 def initialize_from_stock_basic(snapshot_ref: str) -> None:

@@ -1,13 +1,37 @@
+import inspect
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
+import pytest
+from pydantic import ValidationError
+
+import entity_registry
 from entity_registry.core import DecisionType, FinalStatus, ResolutionMethod
-from entity_registry.references import EntityReference, ResolutionCase
+from entity_registry.references import (
+    EntityReference,
+    ResolutionCase,
+    record_resolution_case,
+    register_unresolved_reference_into,
+)
 from entity_registry.resolution_types import (
     BatchResolutionJob,
     MentionCandidateSet,
     ResolutionContext,
     ResolutionDecision,
 )
+from entity_registry.storage import (
+    InMemoryAliasRepository,
+    InMemoryEntityRepository,
+    InMemoryReferenceRepository,
+    InMemoryResolutionCaseRepository,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_public_repositories() -> Iterator[None]:
+    entity_registry.reset_default_repositories()
+    yield
+    entity_registry.reset_default_repositories()
 
 
 def test_entity_reference_builds_resolved_state() -> None:
@@ -25,6 +49,12 @@ def test_entity_reference_builds_resolved_state() -> None:
     assert reference.resolution_method is ResolutionMethod.DETERMINISTIC
 
 
+def test_register_unresolved_reference_public_signature_matches_contract() -> None:
+    signature = inspect.signature(entity_registry.register_unresolved_reference)
+
+    assert list(signature.parameters) == ["reference"]
+
+
 def test_entity_reference_builds_unresolved_state() -> None:
     reference = EntityReference(
         reference_id="ref-2",
@@ -37,6 +67,110 @@ def test_entity_reference_builds_unresolved_state() -> None:
 
     assert reference.resolved_entity_id is None
     assert reference.resolution_method is ResolutionMethod.UNRESOLVED
+
+
+def test_entity_reference_rejects_unresolved_id_with_resolved_method() -> None:
+    with pytest.raises(ValidationError):
+        EntityReference(
+            reference_id="ref-invalid",
+            raw_mention_text="Unknown Corp",
+            source_context={"source": "fixture"},
+            resolved_entity_id=None,
+            resolution_method=ResolutionMethod.DETERMINISTIC,
+            resolution_confidence=None,
+        )
+
+
+def test_entity_reference_rejects_resolved_method_without_confidence() -> None:
+    with pytest.raises(ValidationError):
+        EntityReference(
+            reference_id="ref-invalid",
+            raw_mention_text="CATL",
+            source_context={"source": "fixture"},
+            resolved_entity_id="ENT_STOCK_300750.SZ",
+            resolution_method=ResolutionMethod.DETERMINISTIC,
+            resolution_confidence=None,
+        )
+
+
+def test_entity_reference_rejects_unresolved_method_with_resolution_payload() -> None:
+    with pytest.raises(ValidationError):
+        EntityReference(
+            reference_id="ref-invalid",
+            raw_mention_text="CATL",
+            source_context={"source": "fixture"},
+            resolved_entity_id="ENT_STOCK_300750.SZ",
+            resolution_method=ResolutionMethod.UNRESOLVED,
+            resolution_confidence=None,
+        )
+
+
+def test_entity_reference_rejects_invalid_confidence() -> None:
+    with pytest.raises(ValidationError):
+        EntityReference(
+            reference_id="ref-invalid",
+            raw_mention_text="CATL",
+            source_context={"source": "fixture"},
+            resolved_entity_id="ENT_STOCK_300750.SZ",
+            resolution_method=ResolutionMethod.DETERMINISTIC,
+            resolution_confidence=1.1,
+        )
+
+
+def test_register_unresolved_reference_into_saves_normalized_reference() -> None:
+    repository = InMemoryReferenceRepository()
+
+    reference = register_unresolved_reference_into(
+        {
+            "reference_id": "ref-unresolved",
+            "raw_mention_text": "Unknown Corp",
+            "source_context": {"source": "fixture"},
+            "resolved_entity_id": "ENT_STOCK_300750.SZ",
+            "resolution_method": ResolutionMethod.DETERMINISTIC,
+            "resolution_confidence": 1.0,
+        },
+        repository,
+    )
+
+    assert repository.get("ref-unresolved") == reference
+    assert reference.resolved_entity_id is None
+    assert reference.resolution_method is ResolutionMethod.UNRESOLVED
+    assert reference.resolution_confidence is None
+
+
+def test_public_register_unresolved_reference_uses_configured_repository() -> None:
+    reference_repo = InMemoryReferenceRepository()
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+        reference_repo=reference_repo,
+    )
+
+    reference = entity_registry.register_unresolved_reference(
+        {
+            "reference_id": "ref-public",
+            "raw_mention_text": "Unknown Corp",
+            "source_context": {"source": "fixture"},
+        }
+    )
+
+    assert reference_repo.get("ref-public") == reference
+    assert reference.resolution_method is ResolutionMethod.UNRESOLVED
+
+
+def test_register_unresolved_reference_into_rejects_resolved_model() -> None:
+    repository = InMemoryReferenceRepository()
+    reference = EntityReference(
+        reference_id="ref-resolved",
+        raw_mention_text="CATL",
+        source_context={"source": "fixture"},
+        resolved_entity_id="ENT_STOCK_300750.SZ",
+        resolution_method=ResolutionMethod.DETERMINISTIC,
+        resolution_confidence=1.0,
+    )
+
+    with pytest.raises(ValueError):
+        register_unresolved_reference_into(reference, repository)
 
 
 def test_entity_reference_round_trips_without_data_loss() -> None:
@@ -82,6 +216,23 @@ def test_resolution_case_supports_unresolved_selection() -> None:
 
     assert case.selected_entity_id is None
     assert case.candidate_entity_ids == []
+
+
+def test_record_resolution_case_saves_and_returns_case() -> None:
+    repository = InMemoryResolutionCaseRepository()
+    case = ResolutionCase(
+        case_id="case-3",
+        reference_id="ref-3",
+        candidate_entity_ids=[],
+        selected_entity_id=None,
+        decision_type=DecisionType.AUTO,
+        decision_rationale="no deterministic candidates",
+    )
+
+    saved_case = record_resolution_case(case, repository)
+
+    assert saved_case == case
+    assert repository.get("case-3") == case
 
 
 def test_mention_candidate_set_builds_and_serializes() -> None:
