@@ -1,18 +1,26 @@
+import inspect
 import json
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 
+import entity_registry
+import entity_registry.init as init_module
 from entity_registry.core import AliasType, EntityStatus
 from entity_registry.init import (
     DataPlatformStockBasicReader,
     FileStockBasicSnapshotReader,
+    InitializationError,
     InitializationResult,
+    RepositoryNotConfiguredError,
     StockBasicRecord,
     detect_cross_listing_groups,
     initialize_from_stock_basic,
+    initialize_from_stock_basic_into,
     load_stock_basic_records,
 )
 from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepository
@@ -21,11 +29,18 @@ from entity_registry.storage import InMemoryAliasRepository, InMemoryEntityRepos
 FIXTURE_PATH = Path("tests/fixtures/stock_basic_sample.json")
 
 
+@pytest.fixture(autouse=True)
+def reset_public_repositories() -> Iterator[None]:
+    entity_registry.reset_default_repositories()
+    yield
+    entity_registry.reset_default_repositories()
+
+
 def initialize_from_fixture(
     entity_repo: InMemoryEntityRepository,
     alias_repo: InMemoryAliasRepository,
 ) -> InitializationResult:
-    return initialize_from_stock_basic(
+    return initialize_from_stock_basic_into(
         str(FIXTURE_PATH),
         entity_repo,
         alias_repo,
@@ -64,6 +79,104 @@ def test_initialization_result_builds() -> None:
 
     assert result.entities_created == 1
     assert result.errors == []
+
+
+def test_public_initialize_from_stock_basic_matches_project_contract() -> None:
+    signature = inspect.signature(entity_registry.initialize_from_stock_basic)
+
+    assert list(signature.parameters) == ["snapshot_ref"]
+    assert (
+        get_type_hints(entity_registry.initialize_from_stock_basic)["return"]
+        is type(None)
+    )
+
+
+def test_public_initialize_from_stock_basic_fails_fast_without_repositories() -> None:
+    with pytest.raises(RepositoryNotConfiguredError, match="not configured"):
+        initialize_from_stock_basic(str(FIXTURE_PATH))
+
+
+def test_default_repository_context_returns_one_atomic_pair() -> None:
+    first_entity_repo = InMemoryEntityRepository()
+    first_alias_repo = InMemoryAliasRepository()
+    second_entity_repo = InMemoryEntityRepository()
+    second_alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(first_entity_repo, first_alias_repo)
+
+    entity_repo, alias_repo = entity_registry.get_default_repositories()
+    entity_registry.configure_default_repositories(second_entity_repo, second_alias_repo)
+
+    assert entity_repo is first_entity_repo
+    assert alias_repo is first_alias_repo
+    current_entity_repo, current_alias_repo = entity_registry.get_default_repositories()
+    assert current_entity_repo is second_entity_repo
+    assert current_alias_repo is second_alias_repo
+
+
+def test_public_initialize_uses_captured_repository_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_entity_repo = InMemoryEntityRepository()
+    first_alias_repo = InMemoryAliasRepository()
+    second_entity_repo = InMemoryEntityRepository()
+    second_alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(first_entity_repo, first_alias_repo)
+
+    class ReconfiguringReader:
+        def read(self, snapshot_ref: str) -> list[StockBasicRecord]:
+            entity_registry.configure_default_repositories(
+                second_entity_repo,
+                second_alias_repo,
+            )
+            return [StockBasicRecord(**make_minimal_record_payload())]
+
+    monkeypatch.setattr(
+        init_module,
+        "_default_reader_for_snapshot",
+        lambda snapshot_ref: ReconfiguringReader(),
+    )
+
+    initialize_from_stock_basic("stock-basic-from-test-reader")
+
+    assert first_entity_repo.get("ENT_STOCK_300750.SZ") is not None
+    assert first_alias_repo.find_by_entity("ENT_STOCK_300750.SZ")
+    assert second_entity_repo.list_all() == []
+    assert second_alias_repo.find_by_entity("ENT_STOCK_300750.SZ") == []
+
+
+def test_public_initialize_from_stock_basic_returns_none_for_fixture_snapshot() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(entity_repo, alias_repo)
+
+    result = initialize_from_stock_basic(str(FIXTURE_PATH))
+
+    assert result is None
+    entity = entity_registry.lookup_alias("平安银行")
+    assert entity is not None
+    assert entity.canonical_entity_id == "ENT_STOCK_000001.SZ"
+    assert entity_repo.get("ENT_STOCK_000001.SZ") == entity
+    assert alias_repo.find_by_entity("ENT_STOCK_000001.SZ")
+
+
+def test_public_initialize_from_stock_basic_raises_on_row_errors(tmp_path: Path) -> None:
+    snapshot = tmp_path / "bad-id.json"
+    valid_payload = make_minimal_record_payload(
+        ts_code="688019.SH",
+        symbol="688019",
+        name="安集科技",
+    )
+    invalid_payload = make_minimal_record_payload(ts_code="300750 SZ")
+    snapshot.write_text(json.dumps([valid_payload, invalid_payload]), encoding="utf-8")
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    entity_registry.configure_default_repositories(entity_repo, alias_repo)
+
+    with pytest.raises(InitializationError) as exc_info:
+        initialize_from_stock_basic(str(snapshot))
+
+    assert exc_info.value.errors
+    assert "300750 SZ" in str(exc_info.value)
+    assert entity_repo.list_all() == []
+    assert alias_repo.find_by_text("安集科技") == []
 
 
 def test_load_stock_basic_records_from_json_fixture() -> None:
@@ -202,7 +315,7 @@ def test_data_platform_reader_maps_canonical_stock_basic_rows() -> None:
     assert records[1].list_date is None
 
 
-def test_initialize_from_stock_basic_uses_data_platform_reader_interface() -> None:
+def test_initialize_from_stock_basic_into_uses_data_platform_reader_interface() -> None:
     entity_repo = InMemoryEntityRepository()
     alias_repo = InMemoryAliasRepository()
     reader = DataPlatformStockBasicReader(
@@ -211,7 +324,7 @@ def test_initialize_from_stock_basic_uses_data_platform_reader_interface() -> No
         )
     )
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         "canonical.stock_basic",
         entity_repo,
         alias_repo,
@@ -225,7 +338,7 @@ def test_initialize_from_stock_basic_uses_data_platform_reader_interface() -> No
     assert alias_repo.find_by_text("宁德时代")
 
 
-def test_initialize_from_stock_basic_defaults_to_data_platform_reader(
+def test_initialize_from_stock_basic_into_defaults_to_data_platform_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -239,7 +352,7 @@ def test_initialize_from_stock_basic_defaults_to_data_platform_reader(
 
     monkeypatch.setattr(DataPlatformStockBasicReader, "read", fake_read)
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         "canonical.stock_basic",
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
@@ -339,7 +452,7 @@ def test_initialize_from_stock_basic_is_idempotent_under_concurrent_runs() -> No
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(
             executor.map(
-                lambda _: initialize_from_stock_basic(
+                lambda _: initialize_from_stock_basic_into(
                     str(FIXTURE_PATH),
                     entity_repo,
                     alias_repo,
@@ -398,7 +511,7 @@ def test_initialize_from_stock_basic_empty_snapshot_returns_zero_counts(tmp_path
     snapshot = tmp_path / "empty.json"
     snapshot.write_text("[]", encoding="utf-8")
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         str(snapshot),
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
@@ -415,19 +528,28 @@ def test_initialize_from_stock_basic_empty_snapshot_returns_zero_counts(tmp_path
 
 def test_initialize_from_stock_basic_reports_invalid_entity_id(tmp_path: Path) -> None:
     snapshot = tmp_path / "bad-id.json"
-    payload = make_minimal_record_payload(ts_code="300750 SZ")
-    snapshot.write_text(json.dumps([payload]), encoding="utf-8")
+    valid_payload = make_minimal_record_payload(
+        ts_code="688019.SH",
+        symbol="688019",
+        name="安集科技",
+    )
+    invalid_payload = make_minimal_record_payload(ts_code="300750 SZ")
+    snapshot.write_text(json.dumps([valid_payload, invalid_payload]), encoding="utf-8")
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
 
-    result = initialize_from_stock_basic(
+    result = initialize_from_stock_basic_into(
         str(snapshot),
-        InMemoryEntityRepository(),
-        InMemoryAliasRepository(),
+        entity_repo,
+        alias_repo,
         stock_basic_reader=FileStockBasicSnapshotReader(),
     )
 
     assert result.entities_created == 0
     assert result.aliases_created == 0
     assert result.errors
+    assert entity_repo.list_all() == []
+    assert alias_repo.find_by_text("安集科技") == []
 
 
 def make_minimal_record_payload(**overrides: object) -> dict[str, object]:
