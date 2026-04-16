@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pydantic import BaseModel, Field, model_validator
 
 from entity_registry.core import FinalStatus, ResolutionMethod
+from entity_registry.fuzzy import FuzzyCandidate
 
 
 def _utcnow() -> datetime:
@@ -20,8 +21,10 @@ class MentionCandidateSet(BaseModel):
     deterministic_hits: list[str]
     fuzzy_hits: list[str]
     fuzzy_scores: dict[str, float] = Field(default_factory=dict, exclude=True)
+    fuzzy_candidates: list[FuzzyCandidate] = Field(default_factory=list, exclude=True)
     llm_required: bool
     final_status: FinalStatus
+    failure_rationale: str | None = Field(default=None, exclude=True)
 
 
 class ResolutionContext(BaseModel):

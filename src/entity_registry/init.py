@@ -23,6 +23,7 @@ from entity_registry.core import (
     EntityType,
     generate_stock_entity_id,
 )
+from entity_registry.llm_client import ReasonerRuntimeClient
 from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
@@ -188,6 +189,7 @@ class _RepositoryContext:
     alias_repo: AliasRepository
     reference_repo: ReferenceRepository | None = None
     case_repo: ResolutionCaseRepository | None = None
+    reasoner_client: ReasonerRuntimeClient | None = None
 
 
 _DEFAULT_REPOSITORY_CONTEXT: _RepositoryContext | None = None
@@ -208,6 +210,7 @@ def configure_default_repositories(
     *,
     reference_repo: ReferenceRepository | None = None,
     case_repo: ResolutionCaseRepository | None = None,
+    reasoner_client: ReasonerRuntimeClient | None = None,
 ) -> None:
     """Configure repositories used by public package-level APIs.
 
@@ -221,6 +224,7 @@ def configure_default_repositories(
         alias_repo=alias_repo,
         reference_repo=reference_repo,
         case_repo=case_repo,
+        reasoner_client=reasoner_client,
     )
     with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
         _DEFAULT_REPOSITORY_CONTEXT = context
@@ -229,6 +233,8 @@ def configure_default_repositories(
 def configure_default_in_memory_audit_repositories(
     entity_repo: EntityRepository,
     alias_repo: AliasRepository,
+    *,
+    reasoner_client: ReasonerRuntimeClient | None = None,
 ) -> tuple[InMemoryReferenceRepository, InMemoryResolutionCaseRepository]:
     """Configure default repositories with explicit in-memory audit sinks.
 
@@ -243,6 +249,7 @@ def configure_default_in_memory_audit_repositories(
         alias_repo,
         reference_repo=reference_repo,
         case_repo=case_repo,
+        reasoner_client=reasoner_client,
     )
     return reference_repo, case_repo
 
@@ -298,6 +305,12 @@ def get_default_resolution_repositories() -> tuple[
         context.reference_repo,
         context.case_repo,
     )
+
+
+def get_default_reasoner_client() -> ReasonerRuntimeClient | None:
+    """Return the configured reasoner-runtime client, if one was provided."""
+
+    return _get_default_repository_context().reasoner_client
 
 
 def get_default_entity_repository() -> EntityRepository:
