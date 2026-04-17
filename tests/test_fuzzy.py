@@ -10,6 +10,7 @@ from entity_registry.fuzzy import (
     FuzzyCandidate,
     FuzzyMatcherUnavailable,
     NullFuzzyMatcher,
+    SimpleFuzzyMatcher,
     SplinkFuzzyMatcher,
     build_alias_blocking_key,
     score_alias_similarity,
@@ -46,13 +47,14 @@ def fake_splink(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         fuzzy_module.importlib,
         "import_module",
-        lambda name: object(),
+        lambda name: object() if name == "splink" else None,
     )
 
 
 def test_package_exports_fuzzy_public_types() -> None:
     assert entity_registry.FuzzyCandidate is FuzzyCandidate
     assert entity_registry.NullFuzzyMatcher is NullFuzzyMatcher
+    assert entity_registry.SimpleFuzzyMatcher is SimpleFuzzyMatcher
     assert entity_registry.SplinkFuzzyMatcher is SplinkFuzzyMatcher
 
 
@@ -113,12 +115,11 @@ def test_splink_fuzzy_matcher_raises_when_backend_missing(
         matcher.generate_candidates("贵州茅台股份")
 
 
-def test_splink_fuzzy_matcher_sorts_and_dedupes_candidates_by_entity(
-    fake_splink: None,
+def test_simple_fuzzy_matcher_sorts_and_dedupes_candidates_by_entity(
     initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
 ) -> None:
     entity_repo, alias_repo = initialized_repositories
-    matcher = SplinkFuzzyMatcher(
+    matcher = SimpleFuzzyMatcher(
         entity_repo=entity_repo,
         alias_repo=alias_repo,
         min_score=0.75,
@@ -130,16 +131,15 @@ def test_splink_fuzzy_matcher_sorts_and_dedupes_candidates_by_entity(
         "ENT_STOCK_600519.SH"
     ]
     assert candidates[0].alias_text == "贵州茅台"
-    assert candidates[0].source == "splink"
+    assert candidates[0].source == "simple"
     assert candidates[0].score >= 0.8
 
 
-def test_splink_fuzzy_matcher_keeps_a_h_listings_as_separate_candidates(
-    fake_splink: None,
+def test_simple_fuzzy_matcher_keeps_a_h_listings_as_separate_candidates(
     initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
 ) -> None:
     entity_repo, alias_repo = initialized_repositories
-    matcher = SplinkFuzzyMatcher(
+    matcher = SimpleFuzzyMatcher(
         entity_repo=entity_repo,
         alias_repo=alias_repo,
         min_score=0.75,
@@ -154,12 +154,11 @@ def test_splink_fuzzy_matcher_keeps_a_h_listings_as_separate_candidates(
     assert len(candidates) == 2
 
 
-def test_splink_fuzzy_matcher_respects_limit(
-    fake_splink: None,
+def test_simple_fuzzy_matcher_respects_limit(
     initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
 ) -> None:
     entity_repo, alias_repo = initialized_repositories
-    matcher = SplinkFuzzyMatcher(
+    matcher = SimpleFuzzyMatcher(
         entity_repo=entity_repo,
         alias_repo=alias_repo,
         min_score=0.70,
@@ -168,3 +167,26 @@ def test_splink_fuzzy_matcher_respects_limit(
     candidates = matcher.generate_candidates("银行股份", limit=1)
 
     assert len(candidates) <= 1
+
+
+def test_splink_fuzzy_matcher_does_not_use_simple_heuristic_backend(
+    fake_splink: None,
+    monkeypatch: pytest.MonkeyPatch,
+    initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
+) -> None:
+    entity_repo, _ = initialized_repositories
+    alias_repo = ExplodingAliasRepository()
+
+    def fail_similarity(raw_mention_text: str, alias_text: str) -> float:
+        raise AssertionError("SplinkFuzzyMatcher must not call local similarity")
+
+    monkeypatch.setattr(fuzzy_module, "score_alias_similarity", fail_similarity)
+    matcher = SplinkFuzzyMatcher(entity_repo=entity_repo, alias_repo=alias_repo)
+
+    with pytest.raises(NotImplementedError, match="real Splink candidate generator"):
+        matcher.generate_candidates("贵州茅台股份")
+
+
+class ExplodingAliasRepository(InMemoryAliasRepository):
+    def list_all(self) -> list[object]:
+        raise AssertionError("SplinkFuzzyMatcher must not scan aliases locally")
