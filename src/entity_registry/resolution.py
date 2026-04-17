@@ -395,8 +395,12 @@ def resolve_mention_with_repositories(
     fuzzy_matcher: FuzzyMatcher | None = None,
     ner_extractor: NERExtractor | None = None,
     reasoner_client: ReasonerRuntimeClient | None = None,
+    existing_reference_id: str | None = None,
 ) -> MentionResolutionResult:
     """Resolve one mention using explicit repositories and write audit records."""
+
+    if existing_reference_id is not None and not existing_reference_id.strip():
+        raise ValueError("existing_reference_id must be a non-empty string")
 
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates_with_fuzzy(
@@ -423,14 +427,23 @@ def resolve_mention_with_repositories(
     resolution_confidence = decision.confidence if resolved_entity_id is not None else None
     candidate_entity_ids = _candidate_entity_ids(candidate_set)
 
-    reference = EntityReference(
-        reference_id=_new_reference_id(),
-        raw_mention_text=raw_mention_text,
-        source_context=source_context,
-        resolved_entity_id=resolved_entity_id,
-        resolution_method=resolution_method,
-        resolution_confidence=resolution_confidence,
+    existing_reference = (
+        reference_repo.get(existing_reference_id)
+        if existing_reference_id is not None and reference_repo is not None
+        else None
     )
+    reference_payload = {
+        "reference_id": existing_reference_id or _new_reference_id(),
+        "raw_mention_text": raw_mention_text,
+        "source_context": source_context,
+        "resolved_entity_id": resolved_entity_id,
+        "resolution_method": resolution_method,
+        "resolution_confidence": resolution_confidence,
+    }
+    if existing_reference is not None:
+        reference_payload["created_at"] = existing_reference.created_at
+
+    reference = EntityReference(**reference_payload)
     case = ResolutionCase(
         case_id=_new_case_id(),
         reference_id=reference.reference_id,

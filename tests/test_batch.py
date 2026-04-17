@@ -306,6 +306,85 @@ def test_run_batch_resolution_job_builds_groups_for_dict_and_string_inputs() -> 
     assert report.manual_review_reference_ids == ["ref-dict"]
 
 
+def test_backfill_resolution_updates_original_unresolved_reference_id() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    source = make_reference(
+        "ref-backfill",
+        "贵州茅台",
+        {"document_id": "doc-backfill"},
+    )
+    reference_repo.save(source)
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+    job = BatchResolutionJob(job_id="job-backfill", reference_ids=[], status="pending")
+
+    report = run_batch_resolution_job(
+        job,
+        collect_unresolved_references(reference_repo),
+    )
+
+    updated = reference_repo.get("ref-backfill")
+    assert updated is not None
+    assert updated.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert updated.resolution_method is ResolutionMethod.DETERMINISTIC
+    assert updated.source_context == {"document_id": "doc-backfill"}
+    assert updated.created_at == source.created_at
+    assert reference_repo.find_unresolved() == []
+    assert list(reference_repo._references) == ["ref-backfill"]
+    assert case_repo.find_by_reference("ref-backfill")[0].selected_entity_id == (
+        "ENT_STOCK_600519.SH"
+    )
+    assert report.resolved_reference_ids == ["ref-backfill"]
+    assert report.manual_review_reference_ids == []
+
+
+def test_run_batch_resolution_job_threads_fuzzy_matcher_into_manual_review_groups() -> None:
+    def resolver(
+        raw_mention_text: str,
+        context: object = None,
+    ) -> MentionResolutionResult:
+        return unresolved_result(raw_mention_text)
+
+    matcher = RecordingFuzzyMatcher(
+        {
+            "Ambiguous Co": [
+                make_candidate("ENT_STOCK_000001.SZ", score=0.71, alias_text="Ambiguous"),
+                make_candidate("ENT_STOCK_000002.SZ", score=0.69, alias_text="Ambiguous"),
+            ]
+        }
+    )
+    job = BatchResolutionJob(
+        job_id="job-manual-review-groups",
+        reference_ids=[],
+        status="pending",
+    )
+
+    report = run_batch_resolution_job(
+        job,
+        [{"reference_id": "ref-ambiguous", "raw_mention_text": "Ambiguous Co"}],
+        resolver=resolver,
+        fuzzy_matcher=matcher,
+    )
+
+    assert len(report.groups) == 1
+    assert report.groups[0].reference_ids == ["ref-ambiguous"]
+    assert report.groups[0].candidate_entity_ids == [
+        "ENT_STOCK_000001.SZ",
+        "ENT_STOCK_000002.SZ",
+    ]
+    assert report.groups[0].max_score == 0.71
+    assert matcher.calls == [
+        ("Ambiguous Co", {"limit": 10, "context": {}}),
+    ]
+    assert report.manual_review_reference_ids == ["ref-ambiguous"]
+
+
 def test_public_batch_resolve_uses_configured_ner_fuzzy_reasoner_and_audit() -> None:
     entity_repo, alias_repo = initialized_repositories()
     case_repo = InMemoryResolutionCaseRepository()

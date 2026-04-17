@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -18,7 +19,10 @@ from entity_registry.fuzzy import (
     build_alias_blocking_key,
 )
 from entity_registry.references import EntityReference
-from entity_registry.resolution import resolve_mention
+from entity_registry.resolution import (
+    resolve_mention,
+    resolve_mention_with_repositories,
+)
 from entity_registry.resolution_types import (
     BatchResolutionJob,
     MentionResolutionResult,
@@ -27,8 +31,10 @@ from entity_registry.resolution_types import (
 from entity_registry.storage import ReferenceRepository
 
 
+_DEFAULT_RESOLVE_MENTION = resolve_mention
+
 Resolver = Callable[
-    [str, ResolutionContext | dict[str, object] | None],
+    ...,
     MentionResolutionResult,
 ]
 
@@ -171,10 +177,11 @@ def run_batch_resolution_job(
     ],
     *,
     resolver: Resolver | None = None,
+    fuzzy_matcher: FuzzyMatcher | None = None,
 ) -> BatchResolutionReport:
     """Run one batch job by delegating every unique source reference to a resolver."""
 
-    active_resolver = resolver if resolver is not None else resolve_mention
+    active_resolver = resolver if resolver is not None else _resolve_mention_for_batch
     inputs = [_coerce_reference_input(reference) for reference in references]
     job.reference_ids = _unique_ids([
         item.source_reference_id
@@ -205,7 +212,8 @@ def run_batch_resolution_job(
         outcomes.append(outcome)
 
     groups = cluster_unresolved_references(
-        _candidate_group_references(inputs, outcomes)
+        _candidate_group_references(inputs, outcomes),
+        fuzzy_matcher=fuzzy_matcher,
     )
     resolved_reference_ids = _resolved_reference_ids(outcomes)
     unresolved_reference_ids = _unresolved_reference_ids(outcomes)
@@ -290,7 +298,7 @@ def _resolve_one(
     resolver: Resolver,
 ) -> BatchResolutionOutcome:
     try:
-        result = resolver(item.raw_mention_text, item.source_context)
+        result = _call_resolver(resolver, item)
         if not isinstance(result, MentionResolutionResult):
             result = MentionResolutionResult.model_validate(result)
     except Exception as exc:
@@ -312,6 +320,78 @@ def _resolve_one(
         result=result,
         final_status=_final_status_for(result),
         error=None,
+    )
+
+
+def _call_resolver(
+    resolver: Resolver,
+    item: BatchReferenceInput,
+) -> MentionResolutionResult:
+    if (
+        item.source_reference_id is not None
+        and _resolver_accepts_existing_reference_id(resolver)
+    ):
+        return resolver(
+            item.raw_mention_text,
+            item.source_context,
+            existing_reference_id=item.source_reference_id,
+        )
+    return resolver(item.raw_mention_text, item.source_context)
+
+
+def _resolve_mention_for_batch(
+    raw_mention_text: str,
+    context: ResolutionContext | dict[str, object] | None = None,
+    *,
+    existing_reference_id: str | None = None,
+) -> MentionResolutionResult:
+    if resolve_mention is not _DEFAULT_RESOLVE_MENTION:
+        return resolve_mention(raw_mention_text, context)
+
+    if existing_reference_id is None:
+        return resolve_mention(raw_mention_text, context)
+
+    from entity_registry.init import (
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
+    )
+
+    repository_context = _get_default_repository_context()
+    if (
+        repository_context.reference_repo is None
+        or repository_context.case_repo is None
+    ):
+        raise RepositoryNotConfiguredError(
+            "resolution audit repositories are not configured; "
+            "call configure_default_repositories(..., reference_repo=..., "
+            "case_repo=...) before using public resolution APIs, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+
+    return resolve_mention_with_repositories(
+        raw_mention_text,
+        context,
+        entity_repo=repository_context.entity_repo,
+        alias_repo=repository_context.alias_repo,
+        reference_repo=repository_context.reference_repo,
+        case_repo=repository_context.case_repo,
+        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
+        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        reasoner_client=repository_context.reasoner_client,
+        existing_reference_id=existing_reference_id,
+    )
+
+
+def _resolver_accepts_existing_reference_id(resolver: Resolver) -> bool:
+    try:
+        parameters = inspect.signature(resolver).parameters
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or name == "existing_reference_id"
+        for name, parameter in parameters.items()
     )
 
 
