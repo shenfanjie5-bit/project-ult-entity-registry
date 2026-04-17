@@ -23,7 +23,9 @@ from entity_registry.core import (
     EntityType,
     generate_stock_entity_id,
 )
+from entity_registry.fuzzy import FuzzyMatcher
 from entity_registry.llm_client import ReasonerRuntimeClient
+from entity_registry.ner import NERExtractor
 from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
@@ -189,6 +191,8 @@ class _RepositoryContext:
     alias_repo: AliasRepository
     reference_repo: ReferenceRepository | None = None
     case_repo: ResolutionCaseRepository | None = None
+    fuzzy_matcher: FuzzyMatcher | None = None
+    ner_extractor: NERExtractor | None = None
     reasoner_client: ReasonerRuntimeClient | None = None
 
 
@@ -210,6 +214,8 @@ def configure_default_repositories(
     *,
     reference_repo: ReferenceRepository | None = None,
     case_repo: ResolutionCaseRepository | None = None,
+    fuzzy_matcher: FuzzyMatcher | None = None,
+    ner_extractor: NERExtractor | None = None,
     reasoner_client: ReasonerRuntimeClient | None = None,
 ) -> None:
     """Configure repositories used by public package-level APIs.
@@ -224,6 +230,8 @@ def configure_default_repositories(
         alias_repo=alias_repo,
         reference_repo=reference_repo,
         case_repo=case_repo,
+        fuzzy_matcher=fuzzy_matcher,
+        ner_extractor=ner_extractor,
         reasoner_client=reasoner_client,
     )
     with _DEFAULT_REPOSITORY_CONTEXT_LOCK:
@@ -234,6 +242,8 @@ def configure_default_in_memory_audit_repositories(
     entity_repo: EntityRepository,
     alias_repo: AliasRepository,
     *,
+    fuzzy_matcher: FuzzyMatcher | None = None,
+    ner_extractor: NERExtractor | None = None,
     reasoner_client: ReasonerRuntimeClient | None = None,
 ) -> tuple[InMemoryReferenceRepository, InMemoryResolutionCaseRepository]:
     """Configure default repositories with explicit in-memory audit sinks.
@@ -249,6 +259,8 @@ def configure_default_in_memory_audit_repositories(
         alias_repo,
         reference_repo=reference_repo,
         case_repo=case_repo,
+        fuzzy_matcher=fuzzy_matcher,
+        ner_extractor=ner_extractor,
         reasoner_client=reasoner_client,
     )
     return reference_repo, case_repo

@@ -198,13 +198,20 @@ class DeterministicMatcher:
             )
         except Exception as exc:
             _LOGGER.exception("fuzzy candidate generation failed")
+            failure_rationale = f"fuzzy candidate generation failed: {exc}"
+            final_status, llm_required = _candidate_status(
+                deterministic_hits,
+                [],
+                {},
+                auto_resolve_threshold=_auto_resolve_threshold(fuzzy_matcher),
+            )
             return MentionCandidateSet(
                 raw_mention_text=raw_mention_text,
                 deterministic_hits=deterministic_hits,
                 fuzzy_hits=[],
-                llm_required=False,
-                final_status=FinalStatus.UNRESOLVED,
-                failure_rationale=f"fuzzy candidate generation failed: {exc}",
+                llm_required=llm_required,
+                final_status=final_status,
+                failure_rationale=failure_rationale,
             )
 
         fuzzy_hits = [candidate.canonical_entity_id for candidate in fuzzy_candidates]
@@ -370,6 +377,8 @@ def resolve_mention(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
+        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
+        ner_extractor=getattr(repository_context, "ner_extractor", None),
         reasoner_client=repository_context.reasoner_client,
     )
 
@@ -466,29 +475,49 @@ def _resolve_candidate_set_decision(
     if candidate_set.llm_required and candidate_entity_ids:
         if reasoner_client is None:
             return (
-                ResolutionDecision(
-                    selected_entity_id=None,
-                    method=ResolutionMethod.UNRESOLVED,
-                    confidence=None,
-                    rationale="reasoner client is not configured",
+                _attach_candidate_failure_rationale(
+                    ResolutionDecision(
+                        selected_entity_id=None,
+                        method=ResolutionMethod.UNRESOLVED,
+                        confidence=None,
+                        rationale="reasoner client is not configured",
+                    ),
+                    candidate_set.failure_rationale,
                 ),
                 DecisionType.MANUAL_REVIEW,
             )
         return (
-            _resolve_with_reasoner(
-                candidate_set,
-                context=context,
-                entity_repo=entity_repo,
-                reasoner_client=reasoner_client,
+            _attach_candidate_failure_rationale(
+                _resolve_with_reasoner(
+                    candidate_set,
+                    context=context,
+                    entity_repo=entity_repo,
+                    reasoner_client=reasoner_client,
+                ),
+                candidate_set.failure_rationale,
             ),
             DecisionType.LLM_ASSISTED,
         )
 
     return (
-        decision,
+        _attach_candidate_failure_rationale(
+            decision,
+            candidate_set.failure_rationale,
+        ),
         DecisionType.AUTO
         if not candidate_entity_ids
         else DecisionType.MANUAL_REVIEW,
+    )
+
+
+def _attach_candidate_failure_rationale(
+    decision: ResolutionDecision,
+    failure_rationale: str | None,
+) -> ResolutionDecision:
+    if failure_rationale is None or failure_rationale in decision.rationale:
+        return decision
+    return decision.model_copy(
+        update={"rationale": f"{decision.rationale}; {failure_rationale}"},
     )
 
 
