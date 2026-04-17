@@ -347,21 +347,30 @@ def resolve_mention(
     """Resolve one mention through the configured deterministic path."""
 
     from entity_registry.init import (
-        get_default_reasoner_client,
-        get_default_resolution_repositories,
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
     )
 
-    entity_repo, alias_repo, reference_repo, case_repo = (
-        get_default_resolution_repositories()
-    )
+    repository_context = _get_default_repository_context()
+    if (
+        repository_context.reference_repo is None
+        or repository_context.case_repo is None
+    ):
+        raise RepositoryNotConfiguredError(
+            "resolution audit repositories are not configured; "
+            "call configure_default_repositories(..., reference_repo=..., "
+            "case_repo=...) before using public resolution APIs, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+
     return resolve_mention_with_repositories(
         raw_mention_text,
         context,
-        entity_repo=entity_repo,
-        alias_repo=alias_repo,
-        reference_repo=reference_repo,
-        case_repo=case_repo,
-        reasoner_client=get_default_reasoner_client(),
+        entity_repo=repository_context.entity_repo,
+        alias_repo=repository_context.alias_repo,
+        reference_repo=repository_context.reference_repo,
+        case_repo=repository_context.case_repo,
+        reasoner_client=repository_context.reasoner_client,
     )
 
 
@@ -499,6 +508,7 @@ def _resolve_with_reasoner(
     try:
         response = reasoner_client.disambiguate(request)
     except Exception as exc:
+        _LOGGER.exception("reasoner disambiguation failed")
         error_text = str(exc)
         if "selected_entity_id" in error_text and "candidate" in error_text:
             rationale = f"invalid reasoner selection: {error_text}"
@@ -523,6 +533,7 @@ def _resolve_with_reasoner(
                 },
             )
         except Exception as exc:
+            _LOGGER.exception("reasoner disambiguation failed")
             error_text = str(exc)
             if "selected_entity_id" in error_text and "candidate" in error_text:
                 rationale = f"invalid reasoner selection: {error_text}"
@@ -534,6 +545,17 @@ def _resolve_with_reasoner(
                 confidence=None,
                 rationale=rationale,
             )
+
+    if not isinstance(response, LLMDisambiguationResponse):
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=(
+                "reasoner disambiguation failed: unsupported response type "
+                f"{type(response).__name__}"
+            ),
+        )
 
     return _decision_from_llm_response(response, request.candidates)
 

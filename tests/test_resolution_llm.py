@@ -4,6 +4,7 @@ from collections.abc import Iterator
 import pytest
 
 import entity_registry
+import entity_registry.init as init_module
 from entity_registry.core import AliasType, DecisionType, ResolutionMethod
 from entity_registry.fuzzy import FuzzyCandidate
 from entity_registry.init import (
@@ -324,6 +325,35 @@ def test_reasoner_error_returns_unresolved_llm_assisted_case(
     assert "timed out" in audit_repo.cases[0].decision_rationale
 
 
+def test_malformed_reasoner_response_returns_unresolved_audit_case(
+    initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
+) -> None:
+    entity_repo, alias_repo = initialized_repositories
+    audit_repo = CapturingAuditRepository()
+
+    result = resolve_mention_with_repositories(
+        "宁德时代新能源",
+        None,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_repo=audit_repo,
+        fuzzy_matcher=RecordingFuzzyMatcher(
+            [
+                make_candidate("ENT_STOCK_03750.HK"),
+                make_candidate("ENT_STOCK_300750.SZ"),
+            ]
+        ),
+        reasoner_client=MalformedReasonerClient(),
+    )
+
+    assert result.resolved_entity_id is None
+    assert result.resolution_method is ResolutionMethod.UNRESOLVED
+    assert result.resolution_confidence is None
+    assert audit_repo.references[0].resolution_method is ResolutionMethod.UNRESOLVED
+    assert audit_repo.cases[0].decision_type is DecisionType.LLM_ASSISTED
+    assert "unsupported response type" in audit_repo.cases[0].decision_rationale
+
+
 def test_missing_reasoner_client_returns_manual_review_unresolved(
     initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
 ) -> None:
@@ -374,6 +404,75 @@ def test_public_resolve_mention_uses_configured_reasoner_client(
     assert case_repo.find_by_reference(references[0].reference_id)[0].decision_type is (
         DecisionType.LLM_ASSISTED
     )
+
+
+def test_public_resolve_mention_uses_one_default_context_snapshot(
+    initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entity_repo, alias_repo = initialized_repositories
+    case_repo_a = InMemoryResolutionCaseRepository()
+    reference_repo_a = InMemoryResolutionAuditReferenceRepository(case_repo_a)
+    reasoner_a = RecordingReasonerClient(
+        LLMDisambiguationResponse(
+            selected_entity_id="ENT_STOCK_300750.SZ",
+            confidence=0.86,
+            rationale="first configured context",
+        )
+    )
+    case_repo_b = InMemoryResolutionCaseRepository()
+    reference_repo_b = InMemoryResolutionAuditReferenceRepository(case_repo_b)
+    reasoner_b = RecordingReasonerClient(
+        LLMDisambiguationResponse(
+            selected_entity_id="ENT_STOCK_03750.HK",
+            confidence=0.86,
+            rationale="replacement context",
+        )
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo_a,
+        case_repo=case_repo_a,
+        reasoner_client=reasoner_a,
+    )
+    original_get_context = init_module._get_default_repository_context
+    read_count = 0
+
+    def reconfiguring_get_context() -> object:
+        nonlocal read_count
+        context = original_get_context()
+        read_count += 1
+        if read_count == 1:
+            entity_registry.configure_default_repositories(
+                entity_repo,
+                alias_repo,
+                reference_repo=reference_repo_b,
+                case_repo=case_repo_b,
+                reasoner_client=reasoner_b,
+            )
+        return context
+
+    monkeypatch.setattr(
+        init_module,
+        "_get_default_repository_context",
+        reconfiguring_get_context,
+    )
+
+    result = entity_registry.resolve_mention("宁德时代", {"market": "A-share"})
+
+    references_a = list(reference_repo_a._references.values())
+    assert read_count == 1
+    assert result.resolution_method is ResolutionMethod.LLM
+    assert result.resolved_entity_id == "ENT_STOCK_300750.SZ"
+    assert len(reasoner_a.calls) == 1
+    assert reasoner_b.calls == []
+    assert len(references_a) == 1
+    assert case_repo_a.find_by_reference(references_a[0].reference_id)[0].selected_entity_id == (
+        "ENT_STOCK_300750.SZ"
+    )
+    assert reference_repo_b._references == {}
+    assert case_repo_b.find_by_reference("any") == []
 
 
 def test_llm_audit_failure_propagates_without_delete(
@@ -449,6 +548,11 @@ class FailingReasonerClient:
         request: LLMDisambiguationRequest,
     ) -> LLMDisambiguationResponse:
         raise TimeoutError("runtime timed out")
+
+
+class MalformedReasonerClient:
+    def disambiguate(self, request: LLMDisambiguationRequest) -> object:
+        return ["not", "a", "reasoner", "response"]
 
 
 class CapturingAuditRepository:
