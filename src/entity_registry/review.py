@@ -67,6 +67,7 @@ class UnresolvedQueueItem(BaseModel):
     reference_id: str
     raw_mention_text: str
     source_context: dict[str, object]
+    reference_created_at: datetime | None = None
     candidate_entity_ids: list[str]
     status: str
     claimed_by: str | None = None
@@ -193,6 +194,12 @@ def enqueue_unresolved_reference(
     _require_explicit_unresolved(reference)
     existing = review_repo.find_by_reference(reference.reference_id)
     if existing is not None:
+        if existing.reference_created_at is None:
+            updated = existing.model_copy(
+                update={"reference_created_at": reference.created_at}
+            )
+            review_repo.save(updated)
+            return review_repo.find_by_reference(reference.reference_id) or updated
         return existing
 
     latest_case = _latest_case_for_reference(reference.reference_id, case_repo)
@@ -202,6 +209,7 @@ def enqueue_unresolved_reference(
         reference_id=reference.reference_id,
         raw_mention_text=reference.raw_mention_text,
         source_context=dict(reference.source_context),
+        reference_created_at=reference.created_at,
         candidate_entity_ids=list(latest_case.candidate_entity_ids),
         status=REVIEW_STATUS_PENDING,
         claimed_by=None,
@@ -392,7 +400,12 @@ def _reference_for_decision(
             if selected_entity_id is None
             else _manual_confidence(decision)
         ),
+        created_at=_reference_created_at_for_item(item),
     )
+
+
+def _reference_created_at_for_item(item: UnresolvedQueueItem) -> datetime:
+    return item.reference_created_at or item.created_at
 
 
 def _manual_confidence(decision: ManualReviewDecision) -> float:

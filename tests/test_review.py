@@ -675,6 +675,68 @@ def test_get_resolution_audit_payload_uses_latest_case_and_includes_queue_item()
     assert payload.queue_item == item
 
 
+def test_manual_review_decision_preserves_original_reference_created_at() -> None:
+    original_created_at = datetime(2026, 4, 1, 8, 30, tzinfo=UTC)
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    entity_repo = InMemoryEntityRepository()
+    entity_repo.save(make_entity("ENT_STOCK_300750.SZ"))
+    reference = make_reference(
+        "ref-original-created-at",
+        "宁德时代新能源",
+        created_at=original_created_at,
+    )
+    reference_repo.save(reference)
+    case_repo.save(
+        make_case(
+            "case-original-created-at",
+            "ref-original-created-at",
+            ["ENT_STOCK_300750.SZ"],
+        )
+    )
+
+    (item,) = enqueue_batch_manual_review(
+        make_report(["ref-original-created-at"]),
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+    claimed = claim_review_item(
+        item.queue_item_id,
+        "reviewer-a",
+        review_repo=review_repo,
+    )
+    decision_payload = submit_manual_review_decision(
+        item.queue_item_id,
+        ManualReviewDecision(
+            selected_entity_id="ENT_STOCK_300750.SZ",
+            confidence=0.93,
+            rationale="reviewer selected captured mention",
+        ),
+        review_repo=review_repo,
+        entity_repo=entity_repo,
+        alias_repo=InMemoryAliasRepository(),
+        audit_writer=reference_repo,
+    )
+    audit_payload = get_resolution_audit_payload(
+        "ref-original-created-at",
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+
+    assert item.reference_created_at == original_created_at
+    assert claimed.reference_created_at == original_created_at
+    assert decision_payload.entity_reference.created_at == original_created_at
+    assert reference_repo.get("ref-original-created-at").created_at == (
+        original_created_at
+    )
+    assert audit_payload.entity_reference.created_at == original_created_at
+    assert audit_payload.queue_item.reference_created_at == original_created_at
+    assert audit_payload.queue_item.decided_at is not None
+
+
 def test_review_module_has_no_provider_sdk_or_reasoner_runtime_imports() -> None:
     text = Path("src/entity_registry/review.py").read_text(encoding="utf-8")
 
@@ -740,6 +802,7 @@ def make_reference(
     raw_mention_text: str,
     *,
     resolved_entity_id: str | None = None,
+    created_at: datetime | None = None,
 ) -> EntityReference:
     return EntityReference(
         reference_id=reference_id,
@@ -752,7 +815,7 @@ def make_reference(
             else ResolutionMethod.DETERMINISTIC
         ),
         resolution_confidence=None if resolved_entity_id is None else 1.0,
-        created_at=datetime(2026, 4, 15, tzinfo=UTC),
+        created_at=created_at or datetime(2026, 4, 15, tzinfo=UTC),
     )
 
 
