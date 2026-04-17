@@ -1,3 +1,5 @@
+import pytest
+
 from entity_registry.core import (
     AliasType,
     CanonicalEntity,
@@ -8,15 +10,25 @@ from entity_registry.core import (
     ResolutionMethod,
 )
 from entity_registry.references import EntityReference, ResolutionCase
+from entity_registry.review import (
+    REVIEW_STATUS_CLAIMED,
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_PROMOTED,
+    REVIEW_STATUS_REJECTED,
+    ReviewStateError,
+    UnresolvedQueueItem,
+)
 from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
     InMemoryAliasRepository,
     InMemoryEntityRepository,
     InMemoryReferenceRepository,
+    InMemoryReviewRepository,
     InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
+    ReviewRepository,
     ResolutionCaseRepository,
 )
 
@@ -406,6 +418,128 @@ def test_in_memory_resolution_case_repository_upserts_by_case_id() -> None:
     assert repository.find_by_reference("ref-1") == [updated]
 
 
+def test_review_repository_protocol_is_usable_for_in_memory() -> None:
+    repository: ReviewRepository = InMemoryReviewRepository()
+
+    assert repository.list_by_status(REVIEW_STATUS_PENDING) == []
+
+
+def test_in_memory_review_repository_saves_and_finds_queue_items() -> None:
+    repository = InMemoryReviewRepository()
+    item = make_queue_item("queue-1", "ref-1")
+
+    repository.save(item)
+
+    assert repository.get("queue-1") == item
+    assert repository.find_by_reference("ref-1") == item
+    assert repository.list_by_status(REVIEW_STATUS_PENDING) == [item]
+
+
+def test_in_memory_review_repository_keeps_reference_id_idempotent() -> None:
+    repository = InMemoryReviewRepository()
+    first = make_queue_item("queue-1", "ref-1")
+    duplicate = make_queue_item("queue-2", "ref-1")
+
+    repository.save(first)
+    repository.save(duplicate)
+
+    assert repository.find_by_reference("ref-1") == first
+    assert repository.get("queue-2") is None
+    assert repository.list_by_status(REVIEW_STATUS_PENDING) == [first]
+
+
+def test_in_memory_review_repository_claims_once() -> None:
+    repository = InMemoryReviewRepository()
+    item = make_queue_item("queue-1", "ref-1")
+    repository.save(item)
+
+    claimed = repository.claim("queue-1", "reviewer-a")
+
+    assert claimed.status == REVIEW_STATUS_CLAIMED
+    assert claimed.claimed_by == "reviewer-a"
+    assert repository.claim("queue-1", "reviewer-a") == claimed
+    with pytest.raises(ReviewStateError):
+        repository.claim("queue-1", "reviewer-b")
+
+
+def test_in_memory_review_repository_refuses_terminal_claims() -> None:
+    repository = InMemoryReviewRepository()
+    item = make_queue_item("queue-1", "ref-1").model_copy(
+        update={"status": REVIEW_STATUS_REJECTED}
+    )
+    repository.save(item)
+
+    with pytest.raises(ReviewStateError):
+        repository.claim("queue-1", "reviewer-a")
+
+
+def test_in_memory_review_repository_complete_decision_is_atomic() -> None:
+    repository = InMemoryReviewRepository()
+    item = make_queue_item("queue-1", "ref-1")
+    repository.save(item)
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = InMemoryResolutionAuditReferenceRepository(case_repo)
+    alias_repo = InMemoryAliasRepository()
+
+    def build_records(current: UnresolvedQueueItem):
+        return (
+            make_reference(current.reference_id, "ENT_STOCK_300750.SZ"),
+            make_case("case-review", current.reference_id, "ENT_STOCK_300750.SZ"),
+            None,
+        )
+
+    completed, reference, case = repository.complete_decision(
+        "queue-1",
+        REVIEW_STATUS_PROMOTED,
+        build_records,
+        audit_writer=audit_writer,
+        alias_repo=alias_repo,
+    )
+
+    assert completed.status == REVIEW_STATUS_PROMOTED
+    assert completed.decided_at is not None
+    assert audit_writer.get("ref-1") == reference
+    assert case_repo.get("case-review") == case
+    with pytest.raises(ReviewStateError):
+        repository.complete_decision(
+            "queue-1",
+            REVIEW_STATUS_REJECTED,
+            build_records,
+            audit_writer=audit_writer,
+            alias_repo=alias_repo,
+        )
+    assert len(case_repo.find_by_reference("ref-1")) == 1
+
+
+def test_in_memory_review_repository_complete_decision_rolls_back_on_save_failure() -> None:
+    repository = FailingTerminalReviewRepository()
+    item = make_queue_item("queue-1", "ref-1")
+    repository.save(item)
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = InMemoryResolutionAuditReferenceRepository(case_repo)
+    alias_repo = InMemoryAliasRepository()
+
+    def build_records(current: UnresolvedQueueItem):
+        return (
+            make_reference(current.reference_id, "ENT_STOCK_300750.SZ"),
+            make_case("case-review", current.reference_id, "ENT_STOCK_300750.SZ"),
+            None,
+        )
+
+    with pytest.raises(RuntimeError, match="terminal save failed"):
+        repository.complete_decision(
+            "queue-1",
+            REVIEW_STATUS_PROMOTED,
+            build_records,
+            audit_writer=audit_writer,
+            alias_repo=alias_repo,
+        )
+
+    assert repository.get("queue-1") == item
+    assert audit_writer.get("ref-1") is None
+    assert case_repo.find_by_reference("ref-1") == []
+
+
 class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
     def _validate_save(self, case: ResolutionCase) -> None:
         raise RuntimeError("case persistence failed")
@@ -414,3 +548,19 @@ class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
 class FailingCaseWriteRepository(InMemoryResolutionCaseRepository):
     def _save_unchecked(self, case: ResolutionCase) -> None:
         raise RuntimeError("case write failed")
+
+
+class FailingTerminalReviewRepository(InMemoryReviewRepository):
+    def _save_terminal_unchecked(self, item: UnresolvedQueueItem) -> None:
+        raise RuntimeError("terminal save failed")
+
+
+def make_queue_item(queue_item_id: str, reference_id: str) -> UnresolvedQueueItem:
+    return UnresolvedQueueItem(
+        queue_item_id=queue_item_id,
+        reference_id=reference_id,
+        raw_mention_text="Unknown Corp",
+        source_context={"source": "unit-test"},
+        candidate_entity_ids=[],
+        status=REVIEW_STATUS_PENDING,
+    )
