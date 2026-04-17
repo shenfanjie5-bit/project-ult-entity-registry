@@ -201,6 +201,28 @@ def test_fuzzy_audit_save_failure_does_not_delete_or_half_save(
     assert case_repo.find_by_reference("any") == []
 
 
+def test_fuzzy_backend_failure_writes_unresolved_audit(
+    initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
+) -> None:
+    entity_repo, alias_repo = initialized_repositories
+    audit_repo = CapturingAuditRepository()
+
+    result = resolve_mention_with_repositories(
+        "贵州茅台股份",
+        None,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_repo=audit_repo,
+        fuzzy_matcher=FailingFuzzyMatcher(),
+    )
+
+    assert result.resolved_entity_id is None
+    assert result.resolution_method is ResolutionMethod.UNRESOLVED
+    assert audit_repo.references[0].resolution_method is ResolutionMethod.UNRESOLVED
+    assert audit_repo.cases[0].candidate_entity_ids == []
+    assert "fuzzy candidate generation failed" in audit_repo.cases[0].decision_rationale
+
+
 @pytest.mark.parametrize(
     "threshold",
     [-0.01, 1.01, float("inf"), float("nan")],
@@ -280,6 +302,20 @@ class ThresholdFuzzyMatcher(RecordingFuzzyMatcher):
     def __init__(self, auto_resolve_score: float) -> None:
         super().__init__([])
         self.auto_resolve_score = auto_resolve_score
+
+
+class FailingFuzzyMatcher(RecordingFuzzyMatcher):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def generate_candidates(
+        self,
+        raw_mention_text: str,
+        *,
+        context: object = None,
+        limit: int = 10,
+    ) -> list[FuzzyCandidate]:
+        raise RuntimeError("fuzzy backend unavailable")
 
 
 class StaticNERExtractor:

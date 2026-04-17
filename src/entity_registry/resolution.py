@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Protocol
 
@@ -17,6 +18,12 @@ from entity_registry.core import (
     validate_entity_id,
 )
 from entity_registry.fuzzy import FuzzyCandidate, FuzzyMatcher
+from entity_registry.llm_client import (
+    LLMDisambiguationCandidate,
+    LLMDisambiguationResponse,
+    ReasonerRuntimeClient,
+    build_disambiguation_request,
+)
 from entity_registry.ner import NERExtractor
 from entity_registry.references import (
     EntityReference,
@@ -36,6 +43,10 @@ from entity_registry.storage import (
     ReferenceRepository,
     ResolutionCaseRepository,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
+_LLM_CONFIDENCE_THRESHOLD = 0.80
 
 
 class ResolutionAuditRepository(Protocol):
@@ -177,13 +188,25 @@ class DeterministicMatcher:
                 final_status=FinalStatus.RESOLVED,
             )
 
-        fuzzy_candidates = _generate_fuzzy_candidates(
-            raw_mention_text,
-            context=context,
-            fuzzy_matcher=fuzzy_matcher,
-            ner_extractor=ner_extractor,
-            limit=limit,
-        )
+        try:
+            fuzzy_candidates = _generate_fuzzy_candidates(
+                raw_mention_text,
+                context=context,
+                fuzzy_matcher=fuzzy_matcher,
+                ner_extractor=ner_extractor,
+                limit=limit,
+            )
+        except Exception as exc:
+            _LOGGER.exception("fuzzy candidate generation failed")
+            return MentionCandidateSet(
+                raw_mention_text=raw_mention_text,
+                deterministic_hits=deterministic_hits,
+                fuzzy_hits=[],
+                llm_required=False,
+                final_status=FinalStatus.UNRESOLVED,
+                failure_rationale=f"fuzzy candidate generation failed: {exc}",
+            )
+
         fuzzy_hits = [candidate.canonical_entity_id for candidate in fuzzy_candidates]
         fuzzy_scores = {
             candidate.canonical_entity_id: candidate.score
@@ -201,6 +224,7 @@ class DeterministicMatcher:
             deterministic_hits=deterministic_hits,
             fuzzy_hits=fuzzy_hits,
             fuzzy_scores=fuzzy_scores,
+            fuzzy_candidates=fuzzy_candidates,
             llm_required=llm_required,
             final_status=final_status,
         )
@@ -271,6 +295,14 @@ def _decision_from_candidate_set(
 ) -> ResolutionDecision:
     """Derive a deterministic decision without re-reading candidate repositories."""
 
+    if candidate_set.failure_rationale is not None:
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=candidate_set.failure_rationale,
+        )
+
     if len(candidate_set.deterministic_hits) == 1:
         return ResolutionDecision(
             selected_entity_id=candidate_set.deterministic_hits[0],
@@ -314,18 +346,31 @@ def resolve_mention(
 ) -> MentionResolutionResult:
     """Resolve one mention through the configured deterministic path."""
 
-    from entity_registry.init import get_default_resolution_repositories
-
-    entity_repo, alias_repo, reference_repo, case_repo = (
-        get_default_resolution_repositories()
+    from entity_registry.init import (
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
     )
+
+    repository_context = _get_default_repository_context()
+    if (
+        repository_context.reference_repo is None
+        or repository_context.case_repo is None
+    ):
+        raise RepositoryNotConfiguredError(
+            "resolution audit repositories are not configured; "
+            "call configure_default_repositories(..., reference_repo=..., "
+            "case_repo=...) before using public resolution APIs, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+
     return resolve_mention_with_repositories(
         raw_mention_text,
         context,
-        entity_repo=entity_repo,
-        alias_repo=alias_repo,
-        reference_repo=reference_repo,
-        case_repo=case_repo,
+        entity_repo=repository_context.entity_repo,
+        alias_repo=repository_context.alias_repo,
+        reference_repo=repository_context.reference_repo,
+        case_repo=repository_context.case_repo,
+        reasoner_client=repository_context.reasoner_client,
     )
 
 
@@ -340,6 +385,7 @@ def resolve_mention_with_repositories(
     case_repo: ResolutionCaseRepository | None = None,
     fuzzy_matcher: FuzzyMatcher | None = None,
     ner_extractor: NERExtractor | None = None,
+    reasoner_client: ReasonerRuntimeClient | None = None,
 ) -> MentionResolutionResult:
     """Resolve one mention using explicit repositories and write audit records."""
 
@@ -350,8 +396,12 @@ def resolve_mention_with_repositories(
         fuzzy_matcher=fuzzy_matcher,
         ner_extractor=ner_extractor,
     )
-    decision = matcher.resolve_candidate_set(
+    decision, decision_type = _resolve_candidate_set_decision(
+        matcher,
         candidate_set,
+        context=context,
+        entity_repo=entity_repo,
+        reasoner_client=reasoner_client,
         auto_resolve_threshold=_auto_resolve_threshold(fuzzy_matcher),
     )
     source_context = _source_context_from(context)
@@ -377,11 +427,7 @@ def resolve_mention_with_repositories(
         reference_id=reference.reference_id,
         candidate_entity_ids=candidate_entity_ids,
         selected_entity_id=resolved_entity_id,
-        decision_type=(
-            DecisionType.AUTO
-            if resolved_entity_id is not None or not candidate_entity_ids
-            else DecisionType.MANUAL_REVIEW
-        ),
+        decision_type=decision_type,
         decision_rationale=decision.rationale,
     )
     _save_resolution_audit(
@@ -397,6 +443,243 @@ def resolve_mention_with_repositories(
         resolution_method=resolution_method,
         resolution_confidence=resolution_confidence,
     )
+
+
+def _resolve_candidate_set_decision(
+    matcher: DeterministicMatcher,
+    candidate_set: MentionCandidateSet,
+    *,
+    context: ResolutionContext | dict[str, object] | None,
+    entity_repo: EntityRepository,
+    reasoner_client: ReasonerRuntimeClient | None,
+    auto_resolve_threshold: float,
+) -> tuple[ResolutionDecision, DecisionType]:
+    decision = matcher.resolve_candidate_set(
+        candidate_set,
+        auto_resolve_threshold=auto_resolve_threshold,
+    )
+    candidate_entity_ids = _candidate_entity_ids(candidate_set)
+
+    if decision.selected_entity_id is not None:
+        return decision, DecisionType.AUTO
+
+    if candidate_set.llm_required and candidate_entity_ids:
+        if reasoner_client is None:
+            return (
+                ResolutionDecision(
+                    selected_entity_id=None,
+                    method=ResolutionMethod.UNRESOLVED,
+                    confidence=None,
+                    rationale="reasoner client is not configured",
+                ),
+                DecisionType.MANUAL_REVIEW,
+            )
+        return (
+            _resolve_with_reasoner(
+                candidate_set,
+                context=context,
+                entity_repo=entity_repo,
+                reasoner_client=reasoner_client,
+            ),
+            DecisionType.LLM_ASSISTED,
+        )
+
+    return (
+        decision,
+        DecisionType.AUTO
+        if not candidate_entity_ids
+        else DecisionType.MANUAL_REVIEW,
+    )
+
+
+def _resolve_with_reasoner(
+    candidate_set: MentionCandidateSet,
+    *,
+    context: ResolutionContext | dict[str, object] | None,
+    entity_repo: EntityRepository,
+    reasoner_client: ReasonerRuntimeClient,
+) -> ResolutionDecision:
+    candidates = _llm_candidates_from_candidate_set(candidate_set, entity_repo)
+    request = build_disambiguation_request(
+        candidate_set.raw_mention_text,
+        context,
+        candidates,
+    )
+    try:
+        response = reasoner_client.disambiguate(request)
+    except Exception as exc:
+        _LOGGER.exception("reasoner disambiguation failed")
+        error_text = str(exc)
+        if "selected_entity_id" in error_text and "candidate" in error_text:
+            rationale = f"invalid reasoner selection: {error_text}"
+        else:
+            rationale = f"reasoner disambiguation failed: {error_text}"
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=rationale,
+        )
+
+    if isinstance(response, dict):
+        try:
+            response = LLMDisambiguationResponse.model_validate(
+                response,
+                context={
+                    "candidate_entity_ids": [
+                        candidate.canonical_entity_id
+                        for candidate in request.candidates
+                    ],
+                },
+            )
+        except Exception as exc:
+            _LOGGER.exception("reasoner disambiguation failed")
+            error_text = str(exc)
+            if "selected_entity_id" in error_text and "candidate" in error_text:
+                rationale = f"invalid reasoner selection: {error_text}"
+            else:
+                rationale = f"reasoner disambiguation failed: {error_text}"
+            return ResolutionDecision(
+                selected_entity_id=None,
+                method=ResolutionMethod.UNRESOLVED,
+                confidence=None,
+                rationale=rationale,
+            )
+
+    if not isinstance(response, LLMDisambiguationResponse):
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=(
+                "reasoner disambiguation failed: unsupported response type "
+                f"{type(response).__name__}"
+            ),
+        )
+
+    return _decision_from_llm_response(response, request.candidates)
+
+
+def _decision_from_llm_response(
+    response: LLMDisambiguationResponse,
+    candidates: list[LLMDisambiguationCandidate],
+) -> ResolutionDecision:
+    candidate_ids = {candidate.canonical_entity_id for candidate in candidates}
+    selected_entity_id = response.selected_entity_id
+
+    if selected_entity_id is None:
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=f"reasoner declined: {response.rationale}",
+        )
+    if selected_entity_id not in candidate_ids:
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=(
+                "invalid reasoner selection outside candidate set: "
+                f"{selected_entity_id}"
+            ),
+        )
+    if response.confidence is None:
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=f"reasoner confidence missing: {response.rationale}",
+        )
+    if (
+        not math.isfinite(response.confidence)
+        or response.confidence < _LLM_CONFIDENCE_THRESHOLD
+    ):
+        return ResolutionDecision(
+            selected_entity_id=None,
+            method=ResolutionMethod.UNRESOLVED,
+            confidence=None,
+            rationale=(
+                "reasoner confidence below threshold "
+                f"{_LLM_CONFIDENCE_THRESHOLD}: {response.rationale}"
+            ),
+        )
+
+    return ResolutionDecision(
+        selected_entity_id=selected_entity_id,
+        method=ResolutionMethod.LLM,
+        confidence=response.confidence,
+        rationale=response.rationale,
+    )
+
+
+def _llm_candidates_from_candidate_set(
+    candidate_set: MentionCandidateSet,
+    entity_repo: EntityRepository,
+) -> list[LLMDisambiguationCandidate]:
+    candidates: list[LLMDisambiguationCandidate] = []
+    seen: set[str] = set()
+
+    for entity_id in candidate_set.deterministic_hits:
+        if entity_id in seen:
+            continue
+        seen.add(entity_id)
+        candidates.append(
+            LLMDisambiguationCandidate(
+                canonical_entity_id=entity_id,
+                display_name=_display_name_for(entity_id, entity_repo),
+                alias_text=None,
+                alias_type=None,
+                score=None,
+                source="deterministic",
+            )
+        )
+
+    fuzzy_candidates_by_id = {
+        candidate.canonical_entity_id: candidate
+        for candidate in candidate_set.fuzzy_candidates
+    }
+    for entity_id in candidate_set.fuzzy_hits:
+        if entity_id in seen:
+            continue
+        seen.add(entity_id)
+        fuzzy_candidate = fuzzy_candidates_by_id.get(entity_id)
+        if fuzzy_candidate is None:
+            candidates.append(
+                LLMDisambiguationCandidate(
+                    canonical_entity_id=entity_id,
+                    display_name=_display_name_for(entity_id, entity_repo),
+                    alias_text=None,
+                    alias_type=None,
+                    score=candidate_set.fuzzy_scores.get(entity_id),
+                    source="fuzzy",
+                )
+            )
+            continue
+
+        candidates.append(
+            LLMDisambiguationCandidate(
+                canonical_entity_id=fuzzy_candidate.canonical_entity_id,
+                display_name=_display_name_for(
+                    fuzzy_candidate.canonical_entity_id,
+                    entity_repo,
+                ),
+                alias_text=fuzzy_candidate.alias_text,
+                alias_type=fuzzy_candidate.alias_type.value,
+                score=fuzzy_candidate.score,
+                source=fuzzy_candidate.source,
+            )
+        )
+
+    return candidates
+
+
+def _display_name_for(
+    entity_id: str,
+    entity_repo: EntityRepository,
+) -> str | None:
+    entity = entity_repo.get(entity_id)
+    return None if entity is None else entity.display_name
 
 
 def _save_resolution_audit(
