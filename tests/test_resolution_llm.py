@@ -15,6 +15,7 @@ from entity_registry.llm_client import (
     LLMDisambiguationRequest,
     LLMDisambiguationResponse,
 )
+from entity_registry.ner import ExtractedMention
 from entity_registry.references import EntityReference, ResolutionCase
 from entity_registry.resolution import resolve_mention_with_repositories
 from entity_registry.storage import (
@@ -406,6 +407,72 @@ def test_public_resolve_mention_uses_configured_reasoner_client(
     )
 
 
+def test_public_resolve_mention_uses_configured_ner_fuzzy_and_reasoner(
+    initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
+) -> None:
+    entity_repo, alias_repo = initialized_repositories
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    fuzzy_matcher = RecordingFuzzyMatcher(
+        [
+            make_candidate(
+                "ENT_STOCK_03750.HK",
+                score=0.91,
+                alias_text="宁德时代新能源科技股份有限公司",
+            ),
+            make_candidate(
+                "ENT_STOCK_300750.SZ",
+                score=0.90,
+                alias_text="宁德时代新能源科技股份有限公司",
+            ),
+        ]
+    )
+    ner_extractor = StaticNERExtractor("宁德时代新能源")
+    reasoner_client = RecordingReasonerClient(
+        LLMDisambiguationResponse(
+            selected_entity_id="ENT_STOCK_03750.HK",
+            confidence=0.89,
+            rationale="HK market context",
+        )
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        fuzzy_matcher=fuzzy_matcher,
+        ner_extractor=ner_extractor,
+        reasoner_client=reasoner_client,
+    )
+
+    result = entity_registry.resolve_mention(
+        "公告称宁德时代新能源获增持",
+        {"market": "HK", "document_id": "doc-full-chain"},
+    )
+
+    references = list(reference_repo._references.values())
+    case = case_repo.find_by_reference(references[0].reference_id)[0]
+    assert result.model_dump(mode="json") == {
+        "raw_mention_text": "公告称宁德时代新能源获增持",
+        "resolved_entity_id": "ENT_STOCK_03750.HK",
+        "resolution_method": "llm",
+        "resolution_confidence": 0.89,
+    }
+    assert ner_extractor.calls == ["公告称宁德时代新能源获增持"]
+    assert fuzzy_matcher.calls == ["宁德时代新能源"]
+    assert [candidate.canonical_entity_id for candidate in reasoner_client.calls[0].candidates] == [
+        "ENT_STOCK_03750.HK",
+        "ENT_STOCK_300750.SZ",
+    ]
+    assert references[0].source_context == {
+        "market": "HK",
+        "document_id": "doc-full-chain",
+    }
+    assert references[0].resolution_method is ResolutionMethod.LLM
+    assert case.decision_type is DecisionType.LLM_ASSISTED
+    assert case.selected_entity_id == "ENT_STOCK_03750.HK"
+
+
 def test_public_resolve_mention_uses_one_default_context_snapshot(
     initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
     monkeypatch: pytest.MonkeyPatch,
@@ -511,6 +578,40 @@ def test_llm_audit_failure_propagates_without_delete(
     assert case_repo.find_by_reference("any") == []
 
 
+def test_ambiguous_deterministic_candidates_still_use_reasoner_when_fuzzy_fails(
+    initialized_repositories: tuple[InMemoryEntityRepository, InMemoryAliasRepository],
+) -> None:
+    entity_repo, alias_repo = initialized_repositories
+    audit_repo = CapturingAuditRepository()
+    reasoner_client = RecordingReasonerClient(
+        LLMDisambiguationResponse(
+            selected_entity_id="ENT_STOCK_300750.SZ",
+            confidence=0.86,
+            rationale="A-share context",
+        )
+    )
+
+    result = resolve_mention_with_repositories(
+        "宁德时代",
+        {"market": "A-share"},
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_repo=audit_repo,
+        fuzzy_matcher=FailingFuzzyMatcher(),
+        reasoner_client=reasoner_client,
+    )
+
+    assert result.resolution_method is ResolutionMethod.LLM
+    assert result.resolved_entity_id == "ENT_STOCK_300750.SZ"
+    assert len(reasoner_client.calls) == 1
+    assert audit_repo.cases[0].decision_type is DecisionType.LLM_ASSISTED
+    assert "A-share context" in audit_repo.cases[0].decision_rationale
+    assert (
+        "fuzzy candidate generation failed"
+        in audit_repo.cases[0].decision_rationale
+    )
+
+
 class RecordingFuzzyMatcher:
     auto_resolve_score = 0.96
 
@@ -527,6 +628,34 @@ class RecordingFuzzyMatcher:
     ) -> list[FuzzyCandidate]:
         self.calls.append(raw_mention_text)
         return self._candidates[:limit]
+
+
+class FailingFuzzyMatcher:
+    auto_resolve_score = 0.96
+
+    def generate_candidates(
+        self,
+        raw_mention_text: str,
+        *,
+        context: object = None,
+        limit: int = 10,
+    ) -> list[FuzzyCandidate]:
+        raise RuntimeError("fuzzy backend unavailable")
+
+
+class StaticNERExtractor:
+    def __init__(self, mention_text: str) -> None:
+        self._mention_text = mention_text
+        self.calls: list[str] = []
+
+    def extract_mentions(
+        self,
+        text: str,
+        *,
+        context: object = None,
+    ) -> list[ExtractedMention]:
+        self.calls.append(text)
+        return [ExtractedMention(mention_text=self._mention_text)]
 
 
 class RecordingReasonerClient:
