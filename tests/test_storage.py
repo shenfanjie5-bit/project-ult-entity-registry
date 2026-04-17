@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from entity_registry.core import (
@@ -31,6 +33,8 @@ from entity_registry.storage import (
     ReviewRepository,
     ResolutionCaseRepository,
 )
+
+REFERENCE_CREATED_AT = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
 
 
 def make_entity(entity_id: str = "ENT_STOCK_300750.SZ") -> CanonicalEntity:
@@ -561,6 +565,7 @@ def make_queue_item(queue_item_id: str, reference_id: str) -> UnresolvedQueueIte
         reference_id=reference_id,
         raw_mention_text="Unknown Corp",
         source_context={"source": "unit-test"},
+        reference_created_at=REFERENCE_CREATED_AT,
         candidate_entity_ids=[],
         status=REVIEW_STATUS_PENDING,
     )
