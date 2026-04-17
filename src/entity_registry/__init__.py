@@ -23,6 +23,7 @@ from entity_registry.batch import (
     BatchResolutionOutcome,
     BatchResolutionReport,
     batch_resolve,
+    batch_resolve_with_report,
 )
 from entity_registry.fuzzy import (
     FuzzyCandidate,
@@ -165,6 +166,7 @@ __all__ = [
     "SplinkFuzzyMatcher",
     "UnresolvedQueueItem",
     "batch_resolve",
+    "batch_resolve_with_report",
     "build_disambiguation_request",
     "claim_review_item",
     "configure_default_in_memory_audit_repositories",

@@ -28,10 +28,16 @@ from entity_registry.resolution_types import (
     MentionResolutionResult,
     ResolutionContext,
 )
-from entity_registry.storage import ReferenceRepository
+from entity_registry.storage import ReferenceRepository, ReviewRepository
 
 
 _DEFAULT_RESOLVE_MENTION = resolve_mention
+_RESOLUTION_REPOSITORIES_REQUIRED_MESSAGE = (
+    "resolution audit repositories are not configured; "
+    "call configure_default_repositories(..., reference_repo=..., "
+    "case_repo=...) before using public resolution APIs, or use "
+    "configure_default_in_memory_audit_repositories() for tests/local workflows"
+)
 
 Resolver = Callable[
     ...,
@@ -238,24 +244,112 @@ def run_batch_resolution_job(
 def batch_resolve(
     references: Sequence[EntityReference | dict[str, object] | str],
 ) -> list[MentionResolutionResult]:
-    """Resolve a batch of mentions and return the stable public result shape."""
+    """Resolve a batch of mentions and return the stable public result shape.
+
+    Use batch_resolve_with_report(..., review_repo=...) when callers need the
+    report fields required for manual-review handoff.
+    """
 
     normalized_inputs = [_coerce_reference_input(reference) for reference in references]
-    job = BatchResolutionJob(
+    job = _new_batch_job(normalized_inputs)
+    report = run_batch_resolution_job(job, normalized_inputs)
+    _raise_for_report_errors(report)
+    return [outcome.result for outcome in report.outcomes]
+
+
+def batch_resolve_with_report(
+    references: Sequence[EntityReference | dict[str, object] | str],
+    *,
+    review_repo: ReviewRepository | None = None,
+) -> BatchResolutionReport:
+    """Resolve a batch and return the manual-review handoff report.
+
+    Anonymous dict/string inputs are assigned durable reference IDs before
+    resolution, so unresolved outputs appear in manual_review_reference_ids and
+    can be fetched from the configured reference repository.
+
+    When review_repo is provided, unresolved outputs are enqueued before this
+    function returns. Without review_repo, callers that need handoff must pass
+    the returned report to enqueue_batch_manual_review(report, ...), using the
+    same configured reference and case repositories.
+    """
+
+    repository_context = _get_default_resolution_repository_context()
+    normalized_inputs = _ensure_source_reference_ids(
+        [_coerce_reference_input(reference) for reference in references]
+    )
+    job = _new_batch_job(normalized_inputs)
+    report = run_batch_resolution_job(
+        job,
+        normalized_inputs,
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+    )
+    _raise_for_report_errors(report)
+
+    if review_repo is not None:
+        from entity_registry.review import enqueue_batch_manual_review
+
+        enqueue_batch_manual_review(
+            report,
+            reference_repo=repository_context.reference_repo,
+            case_repo=repository_context.case_repo,
+            review_repo=review_repo,
+        )
+
+    return report
+
+
+def _new_batch_job(inputs: Sequence[BatchReferenceInput]) -> BatchResolutionJob:
+    return BatchResolutionJob(
         job_id=_new_job_id(),
         reference_ids=_unique_ids([
             item.source_reference_id
-            for item in normalized_inputs
+            for item in inputs
             if item.source_reference_id is not None
         ]),
         status="pending",
     )
-    report = run_batch_resolution_job(job, normalized_inputs)
+
+
+def _ensure_source_reference_ids(
+    inputs: Sequence[BatchReferenceInput],
+) -> list[BatchReferenceInput]:
+    normalized: list[BatchReferenceInput] = []
+    for item in inputs:
+        if item.source_reference_id is not None:
+            normalized.append(item)
+            continue
+
+        normalized.append(
+            item.model_copy(
+                update={"source_reference_id": _new_batch_reference_id()},
+            )
+        )
+    return normalized
+
+
+def _get_default_resolution_repository_context():
+    from entity_registry.init import (
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
+    )
+
+    repository_context = _get_default_repository_context()
+    if (
+        repository_context.reference_repo is None
+        or repository_context.case_repo is None
+    ):
+        raise RepositoryNotConfiguredError(
+            _RESOLUTION_REPOSITORIES_REQUIRED_MESSAGE,
+        )
+    return repository_context
+
+
+def _raise_for_report_errors(report: BatchResolutionReport) -> None:
     if report.errors:
         raise RuntimeError(
             "batch resolution failed: " + "; ".join(report.errors),
         )
-    return [outcome.result for outcome in report.outcomes]
 
 
 def _coerce_reference_input(
@@ -351,23 +445,7 @@ def _resolve_mention_for_batch(
     if existing_reference_id is None:
         return resolve_mention(raw_mention_text, context)
 
-    from entity_registry.init import (
-        RepositoryNotConfiguredError,
-        _get_default_repository_context,
-    )
-
-    repository_context = _get_default_repository_context()
-    if (
-        repository_context.reference_repo is None
-        or repository_context.case_repo is None
-    ):
-        raise RepositoryNotConfiguredError(
-            "resolution audit repositories are not configured; "
-            "call configure_default_repositories(..., reference_repo=..., "
-            "case_repo=...) before using public resolution APIs, or use "
-            "configure_default_in_memory_audit_repositories() for tests/local workflows",
-        )
-
+    repository_context = _get_default_resolution_repository_context()
     return resolve_mention_with_repositories(
         raw_mention_text,
         context,
@@ -584,6 +662,10 @@ def _new_job_id() -> str:
     return f"BATCH_{uuid4().hex}"
 
 
+def _new_batch_reference_id() -> str:
+    return f"REF_{uuid4().hex}"
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -594,6 +676,7 @@ __all__ = [
     "BatchResolutionOutcome",
     "BatchResolutionReport",
     "batch_resolve",
+    "batch_resolve_with_report",
     "cluster_unresolved_references",
     "collect_unresolved_references",
     "run_batch_resolution_job",

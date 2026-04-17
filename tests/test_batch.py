@@ -13,6 +13,7 @@ from entity_registry.batch import (
     BatchResolutionOutcome,
     BatchResolutionReport,
     batch_resolve,
+    batch_resolve_with_report,
     cluster_unresolved_references,
     collect_unresolved_references,
     run_batch_resolution_job,
@@ -34,6 +35,7 @@ from entity_registry.storage import (
     InMemoryAliasRepository,
     InMemoryEntityRepository,
     InMemoryReferenceRepository,
+    InMemoryReviewRepository,
     InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
 )
@@ -51,9 +53,17 @@ def reset_public_repositories() -> Iterator[None]:
 
 def test_batch_resolve_public_signature_and_exports() -> None:
     signature = inspect.signature(batch_resolve)
+    report_signature = inspect.signature(batch_resolve_with_report)
 
     assert list(signature.parameters) == ["references"]
+    assert list(report_signature.parameters) == ["references", "review_repo"]
+    assert (
+        report_signature.parameters["review_repo"].kind
+        is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert report_signature.parameters["review_repo"].default is None
     assert entity_registry.batch_resolve is batch_resolve
+    assert entity_registry.batch_resolve_with_report is batch_resolve_with_report
     assert entity_registry.BatchReferenceInput is BatchReferenceInput
     assert entity_registry.BatchCandidateGroup is BatchCandidateGroup
     assert entity_registry.BatchResolutionOutcome is BatchResolutionOutcome
@@ -445,6 +455,139 @@ def test_public_batch_resolve_uses_configured_ner_fuzzy_reasoner_and_audit() -> 
     ]
     assert len(reasoner_client.calls) == 1
     assert list(reference_repo._references.values())[0].source_context == {"market": "HK"}
+
+
+def test_batch_resolve_with_report_enqueues_review_items_and_supports_decisions() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    fuzzy_matcher = RecordingFuzzyMatcher(
+        {
+            "宁德时代新能源": [
+                make_candidate(
+                    "ENT_STOCK_300750.SZ",
+                    score=0.91,
+                    alias_text="宁德时代新能源科技股份有限公司",
+                ),
+                make_candidate(
+                    "ENT_STOCK_03750.HK",
+                    score=0.90,
+                    alias_text="宁德时代新能源科技股份有限公司",
+                ),
+            ]
+        }
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        fuzzy_matcher=fuzzy_matcher,
+    )
+
+    report = batch_resolve_with_report(
+        [
+            {
+                "raw_mention_text": "宁德时代",
+                "source_context": {"document_id": "doc-review", "path": "reject"},
+            },
+            {
+                "raw_mention_text": "宁德时代新能源",
+                "source_context": {"document_id": "doc-review", "path": "promote"},
+            },
+        ],
+        review_repo=review_repo,
+    )
+
+    assert len(report.manual_review_reference_ids) == 2
+    assert set(report.unresolved_reference_ids) == set(
+        report.manual_review_reference_ids
+    )
+    grouped_reference_ids = {
+        reference_id
+        for group in report.groups
+        for reference_id in group.reference_ids
+    }
+    assert set(report.manual_review_reference_ids) <= grouped_reference_ids
+
+    reject_reference_id, promote_reference_id = report.manual_review_reference_ids
+    reject_item = review_repo.find_by_reference(reject_reference_id)
+    promote_item = review_repo.find_by_reference(promote_reference_id)
+    assert reject_item is not None
+    assert promote_item is not None
+    assert reference_repo.get(reject_reference_id).raw_mention_text == "宁德时代"
+    assert reference_repo.get(promote_reference_id).raw_mention_text == (
+        "宁德时代新能源"
+    )
+
+    entity_registry.claim_review_item(
+        reject_item.queue_item_id,
+        "reviewer-a",
+        review_repo=review_repo,
+    )
+    rejected_payload = entity_registry.submit_manual_review_decision(
+        reject_item.queue_item_id,
+        entity_registry.ManualReviewDecision(
+            selected_entity_id=None,
+            confidence=None,
+            rationale="not enough evidence to map to a listing",
+        ),
+        review_repo=review_repo,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_writer=reference_repo,
+    )
+
+    entity_registry.claim_review_item(
+        promote_item.queue_item_id,
+        "reviewer-b",
+        review_repo=review_repo,
+    )
+    promoted_payload = entity_registry.submit_manual_review_decision(
+        promote_item.queue_item_id,
+        entity_registry.ManualReviewDecision(
+            selected_entity_id="ENT_STOCK_300750.SZ",
+            confidence=0.93,
+            rationale="reviewer selected the A-share listing",
+            promote_alias=True,
+            alias_type=AliasType.SHORT_NAME,
+        ),
+        review_repo=review_repo,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_writer=reference_repo,
+    )
+
+    rejected_audit = entity_registry.get_resolution_audit_payload(
+        reject_reference_id,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+    promoted_audit = entity_registry.get_resolution_audit_payload(
+        promote_reference_id,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+    manual_aliases = [
+        alias
+        for alias in alias_repo.find_by_entity("ENT_STOCK_300750.SZ")
+        if alias.alias_text == "宁德时代新能源"
+        and alias.source == "manual_review"
+    ]
+
+    assert rejected_payload.unresolved is True
+    assert rejected_audit.entity_reference.resolution_method is (
+        ResolutionMethod.UNRESOLVED
+    )
+    assert rejected_audit.queue_item.status == "rejected"
+    assert promoted_payload.unresolved is False
+    assert promoted_audit.entity_reference.resolved_entity_id == "ENT_STOCK_300750.SZ"
+    assert promoted_audit.entity_reference.resolution_method is ResolutionMethod.MANUAL
+    assert promoted_audit.queue_item.status == "promoted"
+    assert len(manual_aliases) == 1
 
 
 def test_manual_review_routing_keeps_a_h_shared_short_name_unresolved() -> None:
