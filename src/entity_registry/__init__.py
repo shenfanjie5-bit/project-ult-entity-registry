@@ -17,6 +17,13 @@ from entity_registry.aliases import (
     generate_aliases_from_stock_basic,
     lookup_alias,
 )
+from entity_registry.batch import (
+    BatchCandidateGroup,
+    BatchReferenceInput,
+    BatchResolutionOutcome,
+    BatchResolutionReport,
+    batch_resolve,
+)
 from entity_registry.fuzzy import (
     FuzzyCandidate,
     FuzzyMatcher,
@@ -90,7 +97,11 @@ __all__ = [
     "__version__",
     "AliasType",
     "AliasManager",
+    "BatchCandidateGroup",
+    "BatchReferenceInput",
     "BatchResolutionJob",
+    "BatchResolutionOutcome",
+    "BatchResolutionReport",
     "CallableReasonerRuntimeClient",
     "CanonicalEntity",
     "CanonicalEntityProfile",
@@ -130,6 +141,7 @@ __all__ = [
     "StockBasicRecord",
     "StockBasicSnapshotReader",
     "SplinkFuzzyMatcher",
+    "batch_resolve",
     "build_disambiguation_request",
     "configure_default_in_memory_audit_repositories",
     "configure_default_repositories",

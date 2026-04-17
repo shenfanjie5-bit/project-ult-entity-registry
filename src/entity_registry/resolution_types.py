@@ -82,4 +82,6 @@ class BatchResolutionJob(BaseModel):
     reference_ids: list[str]
     status: str
     created_at: datetime = Field(default_factory=_utcnow)
+    started_at: datetime | None = None
     completed_at: datetime | None = None
+    error_summary: str | None = None
