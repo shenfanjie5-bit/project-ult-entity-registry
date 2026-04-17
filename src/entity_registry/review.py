@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Protocol
@@ -167,6 +168,9 @@ class ReviewAuditWriter(Protocol):
     ) -> None: ...
 
 
+_Rollback = Callable[[], None]
+
+
 def enqueue_unresolved_reference(
     reference: EntityReference,
     *,
@@ -205,7 +209,12 @@ def enqueue_batch_manual_review(
     case_repo: ResolutionCaseRepository,
     review_repo: ReviewRepository,
 ) -> list[UnresolvedQueueItem]:
-    """Queue all manual-review references from a batch report."""
+    """Queue all manual-review references from a batch report.
+
+    This helper processes references one at a time. Persistent adapters that need
+    all-or-nothing batch enqueue semantics should wrap this call in their own
+    storage transaction.
+    """
 
     items: list[UnresolvedQueueItem] = []
     for reference_id in report.manual_review_reference_ids:
@@ -246,46 +255,64 @@ def submit_manual_review_decision(
 ) -> ResolutionAuditPayload:
     """Persist a reviewer decision and complete the queue item."""
 
-    item = _require_queue_item(queue_item_id, review_repo)
-    _require_decidable(item)
-
     selected_entity_id = decision.selected_entity_id
     if selected_entity_id is not None and entity_repo.get(selected_entity_id) is None:
         raise ReviewNotFoundError(
             f"selected canonical entity not found: {selected_entity_id}"
         )
 
-    reference = _reference_for_decision(item, decision)
-    case = ResolutionCase(
-        case_id=_new_case_id(),
-        reference_id=item.reference_id,
-        candidate_entity_ids=_candidate_ids_for_decision(item, selected_entity_id),
-        selected_entity_id=selected_entity_id,
-        decision_type=DecisionType.MANUAL_REVIEW,
-        decision_rationale=decision.rationale,
+    terminal_status = (
+        REVIEW_STATUS_REJECTED
+        if selected_entity_id is None
+        else REVIEW_STATUS_PROMOTED
     )
+    persisted_reference: EntityReference | None = None
+    persisted_case: ResolutionCase | None = None
+    rollback_side_effects: _Rollback | None = None
 
-    audit_writer.save_resolution(reference, case)
+    def persist(item: UnresolvedQueueItem) -> None:
+        nonlocal persisted_reference, persisted_case, rollback_side_effects
 
-    if selected_entity_id is not None and decision.promote_alias:
-        _promote_alias(item, decision, alias_repo)
-
-    now = _utcnow()
-    updated_item = item.model_copy(
-        update={
-            "status": (
-                REVIEW_STATUS_REJECTED
-                if selected_entity_id is None
-                else REVIEW_STATUS_PROMOTED
+        reference = _reference_for_decision(item, decision)
+        case = ResolutionCase(
+            case_id=_new_case_id(),
+            reference_id=item.reference_id,
+            candidate_entity_ids=_candidate_ids_for_decision(
+                item,
+                selected_entity_id,
             ),
-            "updated_at": now,
-            "decided_at": now,
-        }
+            selected_entity_id=selected_entity_id,
+            decision_type=DecisionType.MANUAL_REVIEW,
+            decision_rationale=decision.rationale,
+        )
+        rollback_side_effects = _snapshot_decision_side_effects(
+            audit_writer,
+            alias_repo,
+        )
+        audit_writer.save_resolution(reference, case)
+
+        if selected_entity_id is not None and decision.promote_alias:
+            _promote_alias(item, decision, alias_repo)
+
+        persisted_reference = reference
+        persisted_case = case
+
+    def rollback() -> None:
+        if rollback_side_effects is not None:
+            rollback_side_effects()
+
+    updated_item = review_repo.complete_decision(
+        queue_item_id,
+        terminal_status,
+        persist,
+        rollback,
     )
-    review_repo.save(updated_item)
+    if persisted_reference is None or persisted_case is None:
+        raise RuntimeError("manual review decision did not persist audit payload")
+
     return ResolutionAuditPayload(
-        entity_reference=reference,
-        resolution_case=case,
+        entity_reference=persisted_reference,
+        resolution_case=persisted_case,
         unresolved=selected_entity_id is None,
         queue_item=updated_item,
     )
@@ -410,6 +437,98 @@ def _promote_alias(
             is_primary=False,
         )
     )
+
+
+def _snapshot_decision_side_effects(
+    audit_writer: ReviewAuditWriter,
+    alias_repo: AliasRepository,
+) -> _Rollback:
+    audit_snapshot = _snapshot_audit_writer(audit_writer)
+    alias_snapshot = _snapshot_alias_repository(alias_repo)
+
+    def rollback() -> None:
+        _restore_alias_repository(alias_repo, alias_snapshot)
+        _restore_audit_writer(audit_writer, audit_snapshot)
+
+    return rollback
+
+
+def _snapshot_audit_writer(
+    audit_writer: ReviewAuditWriter,
+) -> tuple[dict[str, EntityReference], dict[str, ResolutionCase]] | None:
+    references = getattr(audit_writer, "_references", None)
+    case_repo = getattr(audit_writer, "_case_repo", None)
+    cases = getattr(case_repo, "_cases", None)
+    if isinstance(references, dict) and isinstance(cases, dict):
+        return (dict(references), dict(cases))
+    return None
+
+
+def _restore_audit_writer(
+    audit_writer: ReviewAuditWriter,
+    snapshot: tuple[dict[str, EntityReference], dict[str, ResolutionCase]] | None,
+) -> None:
+    if snapshot is None:
+        return
+
+    references = getattr(audit_writer, "_references", None)
+    case_repo = getattr(audit_writer, "_case_repo", None)
+    cases = getattr(case_repo, "_cases", None)
+    if isinstance(references, dict) and isinstance(cases, dict):
+        references.clear()
+        references.update(snapshot[0])
+        cases.clear()
+        cases.update(snapshot[1])
+
+
+def _snapshot_alias_repository(
+    alias_repo: AliasRepository,
+) -> tuple[
+    dict[str, list[EntityAlias]],
+    dict[str, list[EntityAlias]],
+    set[tuple[str, str, str]],
+] | None:
+    by_text = getattr(alias_repo, "_by_text", None)
+    by_entity = getattr(alias_repo, "_by_entity", None)
+    semantic_keys = getattr(alias_repo, "_semantic_keys", None)
+    if (
+        isinstance(by_text, dict)
+        and isinstance(by_entity, dict)
+        and isinstance(semantic_keys, set)
+    ):
+        return (
+            {key: list(value) for key, value in by_text.items()},
+            {key: list(value) for key, value in by_entity.items()},
+            set(semantic_keys),
+        )
+    return None
+
+
+def _restore_alias_repository(
+    alias_repo: AliasRepository,
+    snapshot: tuple[
+        dict[str, list[EntityAlias]],
+        dict[str, list[EntityAlias]],
+        set[tuple[str, str, str]],
+    ] | None,
+) -> None:
+    if snapshot is None:
+        return
+
+    by_text = getattr(alias_repo, "_by_text", None)
+    by_entity = getattr(alias_repo, "_by_entity", None)
+    semantic_keys = getattr(alias_repo, "_semantic_keys", None)
+    if (
+        isinstance(by_text, dict)
+        and isinstance(by_entity, dict)
+        and isinstance(semantic_keys, set)
+    ):
+        by_text.clear()
+        by_text.update({key: list(value) for key, value in snapshot[0].items()})
+        by_entity.clear()
+        by_entity.update({key: list(value) for key, value in snapshot[1].items()})
+        semantic_keys.clear()
+        semantic_keys.update(snapshot[2])
 
 
 def _latest_case_for_reference(

@@ -426,6 +426,128 @@ def test_audit_writer_failure_leaves_queue_and_alias_unchanged() -> None:
     assert alias_repo.list_all() == []
 
 
+def test_alias_failure_rolls_back_audit_and_leaves_queue_decidable() -> None:
+    review_repo, item = queued_item(raw_mention_text="宁德时代新能源")
+    claim_review_item(item.queue_item_id, "reviewer-a", review_repo=review_repo)
+    entity_repo = InMemoryEntityRepository()
+    entity_repo.save(make_entity("ENT_STOCK_300750.SZ"))
+    alias_repo = FailingAliasRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = InMemoryResolutionAuditReferenceRepository(case_repo)
+
+    with pytest.raises(RuntimeError, match="alias failed"):
+        submit_manual_review_decision(
+            item.queue_item_id,
+            ManualReviewDecision(
+                selected_entity_id="ENT_STOCK_300750.SZ",
+                confidence=0.9,
+                rationale="reviewer selected A-share listing",
+                promote_alias=True,
+                alias_type=AliasType.SHORT_NAME,
+            ),
+            review_repo=review_repo,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            audit_writer=audit_writer,
+        )
+
+    unchanged = review_repo.get(item.queue_item_id)
+    assert unchanged.status == REVIEW_STATUS_CLAIMED
+    assert unchanged.claimed_by == "reviewer-a"
+    assert audit_writer.get("ref-review") is None
+    assert case_repo.find_by_reference("ref-review") == []
+    assert alias_repo.list_all() == []
+
+
+def test_review_completion_failure_rolls_back_audit_and_alias() -> None:
+    review_repo, item = queued_item_with_repository(
+        FailingTerminalReviewRepository(),
+        raw_mention_text="宁德时代新能源",
+    )
+    claim_review_item(item.queue_item_id, "reviewer-a", review_repo=review_repo)
+    entity_repo = InMemoryEntityRepository()
+    entity_repo.save(make_entity("ENT_STOCK_300750.SZ"))
+    alias_repo = InMemoryAliasRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = InMemoryResolutionAuditReferenceRepository(case_repo)
+
+    with pytest.raises(RuntimeError, match="review completion failed"):
+        submit_manual_review_decision(
+            item.queue_item_id,
+            ManualReviewDecision(
+                selected_entity_id="ENT_STOCK_300750.SZ",
+                confidence=0.9,
+                rationale="reviewer selected A-share listing",
+                promote_alias=True,
+                alias_type=AliasType.SHORT_NAME,
+            ),
+            review_repo=review_repo,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            audit_writer=audit_writer,
+        )
+
+    unchanged = review_repo.get(item.queue_item_id)
+    assert unchanged.status == REVIEW_STATUS_CLAIMED
+    assert unchanged.claimed_by == "reviewer-a"
+    assert audit_writer.get("ref-review") is None
+    assert case_repo.find_by_reference("ref-review") == []
+    assert alias_repo.list_all() == []
+
+
+def test_concurrent_manual_decision_writes_only_one_audit_record() -> None:
+    review_repo, item = queued_item(
+        candidate_entity_ids=["ENT_STOCK_300750.SZ", "ENT_STOCK_03750.HK"]
+    )
+    entity_repo = InMemoryEntityRepository()
+    entity_repo.save(make_entity("ENT_STOCK_300750.SZ"))
+    entity_repo.save(make_entity("ENT_STOCK_03750.HK"))
+    alias_repo = InMemoryAliasRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = BlockingAuditWriter(case_repo)
+
+    first = ManualReviewDecision(
+        selected_entity_id="ENT_STOCK_300750.SZ",
+        confidence=0.91,
+        rationale="first reviewer decision",
+    )
+    second = ManualReviewDecision(
+        selected_entity_id="ENT_STOCK_03750.HK",
+        confidence=0.88,
+        rationale="second reviewer decision",
+    )
+
+    def attempt(decision: ManualReviewDecision) -> tuple[str, str | None]:
+        try:
+            payload = submit_manual_review_decision(
+                item.queue_item_id,
+                decision,
+                review_repo=review_repo,
+                entity_repo=entity_repo,
+                alias_repo=alias_repo,
+                audit_writer=audit_writer,
+            )
+        except ReviewStateError as exc:
+            return ("error", str(exc))
+        return ("ok", payload.resolution_case.selected_entity_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_result = executor.submit(attempt, first)
+        assert audit_writer.started.wait(timeout=2)
+        second_result = executor.submit(attempt, second)
+        audit_writer.release.set()
+        results = [first_result.result(timeout=2), second_result.result(timeout=2)]
+
+    assert [status for status, _ in results].count("ok") == 1
+    assert [status for status, _ in results].count("error") == 1
+    assert case_repo.find_by_reference("ref-review")[0].selected_entity_id == (
+        "ENT_STOCK_300750.SZ"
+    )
+    assert len(case_repo.find_by_reference("ref-review")) == 1
+    assert audit_writer.save_calls == 1
+    assert review_repo.get(item.queue_item_id).status == REVIEW_STATUS_PROMOTED
+
+
 def test_completed_item_cannot_be_claimed_or_decided_again() -> None:
     review_repo, item = queued_item()
     case_repo = InMemoryResolutionCaseRepository()
@@ -535,6 +657,30 @@ def queued_item(
     return review_repo, item
 
 
+def queued_item_with_repository(
+    review_repo: InMemoryReviewRepository,
+    *,
+    raw_mention_text: str = "宁德时代",
+    candidate_entity_ids: list[str] | None = None,
+) -> tuple[InMemoryReviewRepository, UnresolvedQueueItem]:
+    item = UnresolvedQueueItem(
+        queue_item_id="queue-review",
+        reference_id="ref-review",
+        raw_mention_text=raw_mention_text,
+        source_context={"document_id": "doc-review"},
+        candidate_entity_ids=(
+            ["ENT_STOCK_300750.SZ"]
+            if candidate_entity_ids is None
+            else candidate_entity_ids
+        ),
+        status=REVIEW_STATUS_PENDING,
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 15, tzinfo=UTC),
+    )
+    review_repo.save(item)
+    return review_repo, item
+
+
 def make_reference(
     reference_id: str,
     raw_mention_text: str,
@@ -626,3 +772,31 @@ class FailingAuditWriter:
         case: ResolutionCase,
     ) -> None:
         raise RuntimeError("audit failed")
+
+
+class FailingAliasRepository(InMemoryAliasRepository):
+    def save_if_absent(self, alias) -> bool:
+        raise RuntimeError("alias failed")
+
+
+class FailingTerminalReviewRepository(InMemoryReviewRepository):
+    def _save_terminal_unchecked(self, item: UnresolvedQueueItem) -> None:
+        raise RuntimeError("review completion failed")
+
+
+class BlockingAuditWriter(InMemoryResolutionAuditReferenceRepository):
+    def __init__(self, case_repo: InMemoryResolutionCaseRepository) -> None:
+        super().__init__(case_repo)
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.save_calls = 0
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        self.save_calls += 1
+        self.started.set()
+        assert self.release.wait(timeout=2)
+        super().save_resolution(reference, case)

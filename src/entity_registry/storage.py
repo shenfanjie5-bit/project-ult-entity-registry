@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from threading import RLock
 from typing import TYPE_CHECKING, Protocol
@@ -72,7 +73,12 @@ class ResolutionCaseRepository(Protocol):
 
 
 class ReviewRepository(Protocol):
-    """Storage contract for manual review queue items."""
+    """Storage contract for manual review queue items.
+
+    ``complete_decision`` must validate and complete a queue item atomically
+    with the supplied persistence callback. If persistence or terminal save
+    fails, it must call the rollback callback before re-raising.
+    """
 
     def save(self, item: UnresolvedQueueItem) -> None: ...
 
@@ -88,6 +94,14 @@ class ReviewRepository(Protocol):
     ) -> list[UnresolvedQueueItem]: ...
 
     def claim(self, queue_item_id: str, reviewer_id: str) -> UnresolvedQueueItem: ...
+
+    def complete_decision(
+        self,
+        queue_item_id: str,
+        terminal_status: str,
+        persist: Callable[[UnresolvedQueueItem], None],
+        rollback: Callable[[], None] | None = None,
+    ) -> UnresolvedQueueItem: ...
 
 
 class InMemoryEntityRepository:
@@ -297,16 +311,7 @@ class InMemoryReviewRepository:
 
     def save(self, item: UnresolvedQueueItem) -> None:
         with self._lock:
-            existing_id = self._by_reference.get(item.reference_id)
-            if existing_id is not None and existing_id != item.queue_item_id:
-                return
-
-            previous = self._items.get(item.queue_item_id)
-            if previous is not None and previous.reference_id != item.reference_id:
-                self._by_reference.pop(previous.reference_id, None)
-
-            self._items[item.queue_item_id] = item
-            self._by_reference[item.reference_id] = item.queue_item_id
+            self._save_unchecked(item)
 
     def get(self, queue_item_id: str) -> UnresolvedQueueItem | None:
         with self._lock:
@@ -375,6 +380,68 @@ class InMemoryReviewRepository:
             self._items[queue_item_id] = updated
             self._by_reference[updated.reference_id] = queue_item_id
             return updated
+
+    def complete_decision(
+        self,
+        queue_item_id: str,
+        terminal_status: str,
+        persist: Callable[[UnresolvedQueueItem], None],
+        rollback: Callable[[], None] | None = None,
+    ) -> UnresolvedQueueItem:
+        """Complete one decision while holding the review item lock."""
+
+        from entity_registry.review import ReviewNotFoundError, ReviewStateError
+
+        terminal_statuses = {"rejected", "promoted", "decided"}
+        if terminal_status not in terminal_statuses:
+            raise ValueError("terminal_status must be a terminal review status")
+
+        with self._lock:
+            item = self._items.get(queue_item_id)
+            if item is None:
+                raise ReviewNotFoundError(
+                    f"review queue item not found: {queue_item_id}"
+                )
+            if item.status in terminal_statuses:
+                raise ReviewStateError(
+                    f"review queue item already completed: {queue_item_id}"
+                )
+            if item.status not in {"pending", "claimed"}:
+                raise ReviewStateError(
+                    f"review queue item cannot be decided from status={item.status}"
+                )
+
+            now = _utcnow()
+            updated = item.model_copy(
+                update={
+                    "status": terminal_status,
+                    "updated_at": now,
+                    "decided_at": now,
+                }
+            )
+            try:
+                persist(item)
+                self._save_terminal_unchecked(updated)
+            except Exception:
+                if rollback is not None:
+                    rollback()
+                raise
+            return updated
+
+    def _save_unchecked(self, item: UnresolvedQueueItem) -> None:
+        existing_id = self._by_reference.get(item.reference_id)
+        if existing_id is not None and existing_id != item.queue_item_id:
+            return
+
+        previous = self._items.get(item.queue_item_id)
+        if previous is not None and previous.reference_id != item.reference_id:
+            self._by_reference.pop(previous.reference_id, None)
+
+        self._items[item.queue_item_id] = item
+        self._by_reference[item.reference_id] = item.queue_item_id
+
+    def _save_terminal_unchecked(self, item: UnresolvedQueueItem) -> None:
+        self._save_unchecked(item)
 
 
 def _alias_semantic_key(alias: EntityAlias) -> tuple[str, str, str]:

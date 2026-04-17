@@ -13,6 +13,7 @@ from entity_registry.references import EntityReference, ResolutionCase
 from entity_registry.review import (
     REVIEW_STATUS_CLAIMED,
     REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_PROMOTED,
     REVIEW_STATUS_REJECTED,
     ReviewStateError,
     UnresolvedQueueItem,
@@ -472,6 +473,50 @@ def test_in_memory_review_repository_refuses_terminal_claims() -> None:
         repository.claim("queue-1", "reviewer-a")
 
 
+def test_in_memory_review_repository_complete_decision_is_atomic() -> None:
+    repository = InMemoryReviewRepository()
+    item = make_queue_item("queue-1", "ref-1")
+    repository.save(item)
+    persisted: list[str] = []
+
+    completed = repository.complete_decision(
+        "queue-1",
+        REVIEW_STATUS_PROMOTED,
+        lambda current: persisted.append(current.queue_item_id),
+    )
+
+    assert completed.status == REVIEW_STATUS_PROMOTED
+    assert completed.decided_at is not None
+    assert persisted == ["queue-1"]
+    with pytest.raises(ReviewStateError):
+        repository.complete_decision(
+            "queue-1",
+            REVIEW_STATUS_REJECTED,
+            lambda current: persisted.append(current.queue_item_id),
+        )
+    assert persisted == ["queue-1"]
+
+
+def test_in_memory_review_repository_complete_decision_rolls_back_on_save_failure() -> None:
+    repository = FailingTerminalReviewRepository()
+    item = make_queue_item("queue-1", "ref-1")
+    repository.save(item)
+    persisted: list[str] = []
+    rolled_back: list[str] = []
+
+    with pytest.raises(RuntimeError, match="terminal save failed"):
+        repository.complete_decision(
+            "queue-1",
+            REVIEW_STATUS_PROMOTED,
+            lambda current: persisted.append(current.queue_item_id),
+            lambda: rolled_back.append("rollback"),
+        )
+
+    assert repository.get("queue-1") == item
+    assert persisted == ["queue-1"]
+    assert rolled_back == ["rollback"]
+
+
 class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
     def _validate_save(self, case: ResolutionCase) -> None:
         raise RuntimeError("case persistence failed")
@@ -480,6 +525,11 @@ class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):
 class FailingCaseWriteRepository(InMemoryResolutionCaseRepository):
     def _save_unchecked(self, case: ResolutionCase) -> None:
         raise RuntimeError("case write failed")
+
+
+class FailingTerminalReviewRepository(InMemoryReviewRepository):
+    def _save_terminal_unchecked(self, item: UnresolvedQueueItem) -> None:
+        raise RuntimeError("terminal save failed")
 
 
 def make_queue_item(queue_item_id: str, reference_id: str) -> UnresolvedQueueItem:
