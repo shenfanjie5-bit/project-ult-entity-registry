@@ -28,7 +28,7 @@ from entity_registry.llm_client import (
     LLMDisambiguationResponse,
 )
 from entity_registry.ner import ExtractedMention
-from entity_registry.references import EntityReference
+from entity_registry.references import EntityReference, ResolutionCase
 from entity_registry.resolution_types import BatchResolutionJob, MentionResolutionResult
 from entity_registry.storage import (
     InMemoryAliasRepository,
@@ -102,6 +102,29 @@ def test_batch_resolve_normalizes_supported_inputs_and_preserves_order(
         ("Dict Co", {"document_id": "doc-1", "offset": 9}),
         ("Bare Co", {}),
     ]
+
+
+def test_batch_resolve_raises_when_default_repositories_are_not_configured() -> None:
+    with pytest.raises(RuntimeError, match="RepositoryNotConfiguredError"):
+        batch_resolve(["Unconfigured Co"])
+
+
+def test_batch_resolve_raises_on_audit_write_failure() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = FailingAuditReferenceRepository(case_repo)
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        batch_resolve(["Unknown Co"])
+
+    assert reference_repo._references == {}
+    assert case_repo._cases == {}
 
 
 def test_collect_unresolved_references_filters_sorts_and_limits() -> None:
@@ -245,6 +268,42 @@ def test_run_batch_resolution_job_keeps_completed_outcomes_when_one_item_fails()
     assert report.resolved_reference_ids == ["ref-ok"]
     assert report.unresolved_reference_ids == ["ref-bad"]
     assert report.manual_review_reference_ids == ["ref-bad"]
+
+
+def test_run_batch_resolution_job_builds_groups_for_dict_and_string_inputs() -> None:
+    def resolver(
+        raw_mention_text: str,
+        context: object = None,
+    ) -> MentionResolutionResult:
+        return unresolved_result(raw_mention_text)
+
+    job = BatchResolutionJob(job_id="job-groups", reference_ids=[], status="pending")
+    report = run_batch_resolution_job(
+        job,
+        [
+            {
+                "reference_id": "ref-dict",
+                "raw_mention_text": "Dict Missing",
+                "source_context": {"document_id": "doc-1"},
+            },
+            "Bare Missing",
+        ],
+        resolver=resolver,
+    )
+
+    group_reference_ids = {
+        reference_id
+        for group in report.groups
+        for reference_id in group.reference_ids
+    }
+    group_mentions = {
+        raw_mention
+        for group in report.groups
+        for raw_mention in group.raw_mentions
+    }
+    assert group_reference_ids == {"ref-dict", "batch-input:1"}
+    assert group_mentions == {"Dict Missing", "Bare Missing"}
+    assert report.manual_review_reference_ids == ["ref-dict"]
 
 
 def test_public_batch_resolve_uses_configured_ner_fuzzy_reasoner_and_audit() -> None:
@@ -476,6 +535,15 @@ class RecordingFuzzyMatcher:
             )
         )
         return self._candidates_by_text.get(raw_mention_text, [])[:limit]
+
+
+class FailingAuditReferenceRepository(InMemoryResolutionAuditReferenceRepository):
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        raise RuntimeError("audit failed")
 
 
 class StaticNERExtractor:

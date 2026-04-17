@@ -166,7 +166,9 @@ def cluster_unresolved_references(
 
 def run_batch_resolution_job(
     job: BatchResolutionJob,
-    references: Sequence[EntityReference | dict[str, object] | str],
+    references: Sequence[
+        EntityReference | BatchReferenceInput | dict[str, object] | str
+    ],
     *,
     resolver: Resolver | None = None,
 ) -> BatchResolutionReport:
@@ -203,13 +205,7 @@ def run_batch_resolution_job(
         outcomes.append(outcome)
 
     groups = cluster_unresolved_references(
-        [
-            reference
-            for reference in references
-            if isinstance(reference, EntityReference)
-            and reference.resolution_method is ResolutionMethod.UNRESOLVED
-            and reference.resolved_entity_id is None
-        ]
+        _candidate_group_references(inputs, outcomes)
     )
     resolved_reference_ids = _resolved_reference_ids(outcomes)
     unresolved_reference_ids = _unresolved_reference_ids(outcomes)
@@ -247,6 +243,10 @@ def batch_resolve(
         status="pending",
     )
     report = run_batch_resolution_job(job, normalized_inputs)
+    if report.errors:
+        raise RuntimeError(
+            "batch resolution failed: " + "; ".join(report.errors),
+        )
     return [outcome.result for outcome in report.outcomes]
 
 
@@ -327,7 +327,39 @@ def _final_status_for(result: MentionResolutionResult) -> FinalStatus:
         }
     ):
         return FinalStatus.RESOLVED
+    # FinalStatus.MANUAL_REVIEW is reserved for the persistent review queue in #10.
+    # This batch layer routes unresolved/error outcomes to manual_review_reference_ids.
     return FinalStatus.UNRESOLVED
+
+
+def _candidate_group_references(
+    inputs: Sequence[BatchReferenceInput],
+    outcomes: Sequence[BatchResolutionOutcome],
+) -> list[EntityReference]:
+    references: list[EntityReference] = []
+    for index, (item, outcome) in enumerate(zip(inputs, outcomes, strict=True)):
+        if not _routes_to_manual_review(outcome):
+            continue
+
+        references.append(
+            EntityReference(
+                reference_id=item.source_reference_id or f"batch-input:{index}",
+                raw_mention_text=item.raw_mention_text,
+                source_context=dict(item.source_context),
+                resolved_entity_id=outcome.result.resolved_entity_id,
+                resolution_method=outcome.result.resolution_method,
+                resolution_confidence=outcome.result.resolution_confidence,
+            )
+        )
+    return references
+
+
+def _routes_to_manual_review(outcome: BatchResolutionOutcome) -> bool:
+    return (
+        outcome.final_status is FinalStatus.MANUAL_REVIEW
+        or outcome.result.resolved_entity_id is None
+        or outcome.error is not None
+    )
 
 
 def _resolved_reference_ids(outcomes: Sequence[BatchResolutionOutcome]) -> list[str]:
@@ -355,11 +387,7 @@ def _manual_review_reference_ids(
         outcome.source_reference_id
         for outcome in outcomes
         if outcome.source_reference_id is not None
-        if (
-            outcome.final_status is FinalStatus.MANUAL_REVIEW
-            or outcome.result.resolved_entity_id is None
-            or outcome.error is not None
-        )
+        if _routes_to_manual_review(outcome)
     ])
 
 
