@@ -380,21 +380,10 @@ def _validate_effective_reference_ids(inputs: Sequence[BatchReferenceInput]) -> 
             seen_by_reference_id[item.source_reference_id] = item
             continue
 
-        if not _same_reference_input_identity(existing, item):
-            raise ValueError(
-                "duplicate source_reference_id maps to different batch inputs: "
-                f"{item.source_reference_id}"
-            )
-
-
-def _same_reference_input_identity(
-    first: BatchReferenceInput,
-    second: BatchReferenceInput,
-) -> bool:
-    return (
-        first.raw_mention_text == second.raw_mention_text
-        and first.source_context == second.source_context
-    )
+        raise ValueError(
+            "duplicate source_reference_id in batch inputs: "
+            f"{item.source_reference_id}"
+        )
 
 
 def _enqueue_manual_review_items(
