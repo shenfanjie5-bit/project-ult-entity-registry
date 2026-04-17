@@ -28,7 +28,11 @@ from entity_registry.resolution_types import (
     MentionResolutionResult,
     ResolutionContext,
 )
-from entity_registry.storage import ReferenceRepository, ReviewRepository
+from entity_registry.storage import (
+    ReferenceRepository,
+    ResolutionCaseRepository,
+    ReviewRepository,
+)
 
 
 _DEFAULT_RESOLVE_MENTION = resolve_mention
@@ -261,22 +265,25 @@ def batch_resolve_with_report(
     references: Sequence[EntityReference | dict[str, object] | str],
     *,
     review_repo: ReviewRepository | None = None,
+    reference_ids: Sequence[str | None] | None = None,
 ) -> BatchResolutionReport:
     """Resolve a batch and return the manual-review handoff report.
 
     Anonymous dict/string inputs are assigned durable reference IDs before
-    resolution, so unresolved outputs appear in manual_review_reference_ids and
-    can be fetched from the configured reference repository.
+    resolution. Callers can pass reference_ids to make those assignments stable
+    across retry attempts.
 
     When review_repo is provided, unresolved outputs are enqueued before this
-    function returns. Without review_repo, callers that need handoff must pass
-    the returned report to enqueue_batch_manual_review(report, ...), using the
-    same configured reference and case repositories.
+    function returns. If enqueue fails after audit persistence, the returned
+    report records the enqueue error so callers can retry
+    enqueue_batch_manual_review(report, ...) with the same configured reference
+    and case repositories.
     """
 
     repository_context = _get_default_resolution_repository_context()
     normalized_inputs = _ensure_source_reference_ids(
-        [_coerce_reference_input(reference) for reference in references]
+        [_coerce_reference_input(reference) for reference in references],
+        reference_ids=reference_ids,
     )
     job = _new_batch_job(normalized_inputs)
     report = run_batch_resolution_job(
@@ -287,9 +294,7 @@ def batch_resolve_with_report(
     _raise_for_report_errors(report)
 
     if review_repo is not None:
-        from entity_registry.review import enqueue_batch_manual_review
-
-        enqueue_batch_manual_review(
+        _enqueue_manual_review_items(
             report,
             reference_repo=repository_context.reference_repo,
             case_repo=repository_context.case_repo,
@@ -313,19 +318,67 @@ def _new_batch_job(inputs: Sequence[BatchReferenceInput]) -> BatchResolutionJob:
 
 def _ensure_source_reference_ids(
     inputs: Sequence[BatchReferenceInput],
+    *,
+    reference_ids: Sequence[str | None] | None = None,
 ) -> list[BatchReferenceInput]:
+    if reference_ids is not None and len(reference_ids) != len(inputs):
+        raise ValueError("reference_ids length must match references length")
+
     normalized: list[BatchReferenceInput] = []
-    for item in inputs:
+    for index, item in enumerate(inputs):
+        supplied_reference_id = (
+            None if reference_ids is None else reference_ids[index]
+        )
+        if supplied_reference_id is not None:
+            if (
+                not isinstance(supplied_reference_id, str)
+                or not supplied_reference_id.strip()
+            ):
+                raise ValueError("reference_ids must contain non-empty strings")
+
         if item.source_reference_id is not None:
+            if (
+                supplied_reference_id is not None
+                and supplied_reference_id != item.source_reference_id
+            ):
+                raise ValueError(
+                    "reference_ids cannot override an input source_reference_id"
+                )
             normalized.append(item)
             continue
 
         normalized.append(
             item.model_copy(
-                update={"source_reference_id": _new_batch_reference_id()},
+                update={
+                    "source_reference_id": (
+                        supplied_reference_id or _new_batch_reference_id()
+                    ),
+                },
             )
         )
     return normalized
+
+
+def _enqueue_manual_review_items(
+    report: BatchResolutionReport,
+    *,
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+    review_repo: ReviewRepository,
+) -> None:
+    from entity_registry.review import enqueue_batch_manual_review
+
+    try:
+        enqueue_batch_manual_review(
+            report,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            review_repo=review_repo,
+        )
+    except Exception as exc:
+        error = f"manual review enqueue failed: {type(exc).__name__}: {exc}"
+        report.errors.append(error)
+        _mark_job_failed(report.job, error)
 
 
 def _get_default_resolution_repository_context():

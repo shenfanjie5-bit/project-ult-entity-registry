@@ -56,12 +56,21 @@ def test_batch_resolve_public_signature_and_exports() -> None:
     report_signature = inspect.signature(batch_resolve_with_report)
 
     assert list(signature.parameters) == ["references"]
-    assert list(report_signature.parameters) == ["references", "review_repo"]
+    assert list(report_signature.parameters) == [
+        "references",
+        "review_repo",
+        "reference_ids",
+    ]
     assert (
         report_signature.parameters["review_repo"].kind
         is inspect.Parameter.KEYWORD_ONLY
     )
     assert report_signature.parameters["review_repo"].default is None
+    assert (
+        report_signature.parameters["reference_ids"].kind
+        is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert report_signature.parameters["reference_ids"].default is None
     assert entity_registry.batch_resolve is batch_resolve
     assert entity_registry.batch_resolve_with_report is batch_resolve_with_report
     assert entity_registry.BatchReferenceInput is BatchReferenceInput
@@ -590,6 +599,73 @@ def test_batch_resolve_with_report_enqueues_review_items_and_supports_decisions(
     assert len(manual_aliases) == 1
 
 
+def test_batch_resolve_with_report_returns_report_when_review_enqueue_fails() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = FailingAfterSaveCountReviewRepository(fail_after=1)
+    reference_ids = ["ref-review-retry-a", "ref-review-retry-b"]
+    inputs = [
+        {
+            "raw_mention_text": "Unlisted Retry A",
+            "source_context": {"document_id": "doc-retry", "offset": 1},
+        },
+        {
+            "raw_mention_text": "Unlisted Retry B",
+            "source_context": {"document_id": "doc-retry", "offset": 2},
+        },
+    ]
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    report = batch_resolve_with_report(
+        inputs,
+        review_repo=review_repo,
+        reference_ids=reference_ids,
+    )
+
+    assert report.manual_review_reference_ids == reference_ids
+    assert report.unresolved_reference_ids == reference_ids
+    assert report.job.status == "failed"
+    assert len(report.errors) == 1
+    assert "manual review enqueue failed" in report.errors[0]
+    assert "review save failed" in report.errors[0]
+    assert review_repo.find_by_reference(reference_ids[0]) is not None
+    assert review_repo.find_by_reference(reference_ids[1]) is None
+    assert {
+        reference.reference_id
+        for reference in reference_repo._references.values()
+    } == set(reference_ids)
+    assert all(
+        case_repo.find_by_reference(reference_id)
+        for reference_id in reference_ids
+    )
+
+    review_repo.fail_after = None
+    entity_registry.enqueue_batch_manual_review(
+        report,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+
+    assert review_repo.find_by_reference(reference_ids[0]) is not None
+    assert review_repo.find_by_reference(reference_ids[1]) is not None
+
+    retry_report = batch_resolve_with_report(
+        inputs,
+        review_repo=review_repo,
+        reference_ids=reference_ids,
+    )
+
+    assert retry_report.manual_review_reference_ids == reference_ids
+    assert set(reference_repo._references) == set(reference_ids)
+
+
 def test_manual_review_routing_keeps_a_h_shared_short_name_unresolved() -> None:
     entity_repo, alias_repo = initialized_repositories()
     case_repo = InMemoryResolutionCaseRepository()
@@ -766,6 +842,19 @@ class FailingAuditReferenceRepository(InMemoryResolutionAuditReferenceRepository
         case: ResolutionCase,
     ) -> None:
         raise RuntimeError("audit failed")
+
+
+class FailingAfterSaveCountReviewRepository(InMemoryReviewRepository):
+    def __init__(self, *, fail_after: int | None) -> None:
+        super().__init__()
+        self.fail_after = fail_after
+        self.save_attempts = 0
+
+    def save(self, item: entity_registry.UnresolvedQueueItem) -> None:
+        self.save_attempts += 1
+        if self.fail_after is not None and self.save_attempts > self.fail_after:
+            raise RuntimeError("review save failed")
+        super().save(item)
 
 
 class StaticNERExtractor:
