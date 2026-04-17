@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from threading import RLock
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from entity_registry.core import CanonicalEntity, EntityAlias
 from entity_registry.references import EntityReference, ResolutionCase
+
+if TYPE_CHECKING:
+    from entity_registry.review import UnresolvedQueueItem
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 class EntityRepository(Protocol):
@@ -61,6 +69,25 @@ class ResolutionCaseRepository(Protocol):
     def get(self, case_id: str) -> ResolutionCase | None: ...
 
     def find_by_reference(self, reference_id: str) -> list[ResolutionCase]: ...
+
+
+class ReviewRepository(Protocol):
+    """Storage contract for manual review queue items."""
+
+    def save(self, item: UnresolvedQueueItem) -> None: ...
+
+    def get(self, queue_item_id: str) -> UnresolvedQueueItem | None: ...
+
+    def find_by_reference(self, reference_id: str) -> UnresolvedQueueItem | None: ...
+
+    def list_by_status(
+        self,
+        status: str,
+        *,
+        limit: int | None = None,
+    ) -> list[UnresolvedQueueItem]: ...
+
+    def claim(self, queue_item_id: str, reviewer_id: str) -> UnresolvedQueueItem: ...
 
 
 class InMemoryEntityRepository:
@@ -258,6 +285,96 @@ class InMemoryResolutionCaseRepository:
 
     def _save_unchecked(self, case: ResolutionCase) -> None:
         self._cases[case.case_id] = case
+
+
+class InMemoryReviewRepository:
+    """Dictionary-backed review repository with reference-level idempotency."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, UnresolvedQueueItem] = {}
+        self._by_reference: dict[str, str] = {}
+        self._lock = RLock()
+
+    def save(self, item: UnresolvedQueueItem) -> None:
+        with self._lock:
+            existing_id = self._by_reference.get(item.reference_id)
+            if existing_id is not None and existing_id != item.queue_item_id:
+                return
+
+            previous = self._items.get(item.queue_item_id)
+            if previous is not None and previous.reference_id != item.reference_id:
+                self._by_reference.pop(previous.reference_id, None)
+
+            self._items[item.queue_item_id] = item
+            self._by_reference[item.reference_id] = item.queue_item_id
+
+    def get(self, queue_item_id: str) -> UnresolvedQueueItem | None:
+        with self._lock:
+            return self._items.get(queue_item_id)
+
+    def find_by_reference(self, reference_id: str) -> UnresolvedQueueItem | None:
+        with self._lock:
+            queue_item_id = self._by_reference.get(reference_id)
+            if queue_item_id is None:
+                return None
+            return self._items.get(queue_item_id)
+
+    def list_by_status(
+        self,
+        status: str,
+        *,
+        limit: int | None = None,
+    ) -> list[UnresolvedQueueItem]:
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be non-negative")
+
+        status_value = getattr(status, "value", status)
+        with self._lock:
+            items = [
+                item
+                for item in self._items.values()
+                if item.status == status_value
+            ]
+            items.sort(key=lambda item: (item.created_at, item.queue_item_id))
+            if limit is None:
+                return items
+            return items[:limit]
+
+    def claim(self, queue_item_id: str, reviewer_id: str) -> UnresolvedQueueItem:
+        from entity_registry.review import ReviewNotFoundError, ReviewStateError
+
+        normalized_reviewer_id = reviewer_id.strip()
+        if not normalized_reviewer_id:
+            raise ValueError("reviewer_id must be a non-empty string")
+
+        with self._lock:
+            item = self._items.get(queue_item_id)
+            if item is None:
+                raise ReviewNotFoundError(
+                    f"review queue item not found: {queue_item_id}"
+                )
+
+            if item.status == "claimed":
+                if item.claimed_by == normalized_reviewer_id:
+                    return item
+                raise ReviewStateError(
+                    f"review queue item already claimed: {queue_item_id}"
+                )
+            if item.status != "pending":
+                raise ReviewStateError(
+                    f"review queue item cannot be claimed from status={item.status}"
+                )
+
+            updated = item.model_copy(
+                update={
+                    "status": "claimed",
+                    "claimed_by": normalized_reviewer_id,
+                    "updated_at": _utcnow(),
+                }
+            )
+            self._items[queue_item_id] = updated
+            self._by_reference[updated.reference_id] = queue_item_id
+            return updated
 
 
 def _alias_semantic_key(alias: EntityAlias) -> tuple[str, str, str]:
