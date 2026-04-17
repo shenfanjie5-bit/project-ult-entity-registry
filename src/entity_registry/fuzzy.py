@@ -82,8 +82,75 @@ class NullFuzzyMatcher:
         return []
 
 
+class SimpleFuzzyMatcher:
+    """Local alias-table fuzzy matcher using deterministic text similarity."""
+
+    def __init__(
+        self,
+        *,
+        entity_repo: EntityRepository,
+        alias_repo: AliasRepository,
+        min_score: float = 0.80,
+        auto_resolve_score: float = 0.96,
+    ) -> None:
+        if min_score < 0.0 or min_score > 1.0:
+            raise ValueError("min_score must be between 0.0 and 1.0")
+        if auto_resolve_score < 0.0 or auto_resolve_score > 1.0:
+            raise ValueError("auto_resolve_score must be between 0.0 and 1.0")
+
+        self._entity_repo = entity_repo
+        self._alias_repo = alias_repo
+        self.min_score = min_score
+        self.auto_resolve_score = auto_resolve_score
+
+    def generate_candidates(
+        self,
+        raw_mention_text: str,
+        *,
+        context: "ResolutionContext | dict[str, object] | None" = None,
+        limit: int = 10,
+    ) -> list[FuzzyCandidate]:
+        if limit <= 0:
+            return []
+
+        raw_blocking_key = build_alias_blocking_key(raw_mention_text)
+        candidates: list[FuzzyCandidate] = []
+        for alias in self._alias_repo.list_all():
+            if self._entity_repo.get(alias.canonical_entity_id) is None:
+                continue
+
+            blocking_key = build_alias_blocking_key(alias.alias_text)
+            score = score_alias_similarity(raw_mention_text, alias.alias_text)
+            if (
+                raw_blocking_key
+                and blocking_key
+                and raw_blocking_key != blocking_key
+                and score < 1.0
+            ):
+                continue
+            if score < self.min_score:
+                continue
+
+            candidates.append(
+                FuzzyCandidate(
+                    canonical_entity_id=alias.canonical_entity_id,
+                    alias_text=alias.alias_text,
+                    alias_type=alias.alias_type,
+                    score=score,
+                    source="simple",
+                    blocking_key=blocking_key or None,
+                )
+            )
+
+        return _dedupe_sort_and_limit_candidates(candidates, limit)
+
+
 class SplinkFuzzyMatcher:
-    """Alias-table fuzzy matcher guarded by a lazy Splink availability check."""
+    """Splink-backed fuzzy matcher placeholder.
+
+    This adapter is intentionally separate from SimpleFuzzyMatcher so a caller
+    cannot accidentally get local difflib behavior from a Splink-named backend.
+    """
 
     def __init__(
         self,
@@ -114,37 +181,10 @@ class SplinkFuzzyMatcher:
         if limit <= 0:
             return []
         self._ensure_splink_available()
-
-        raw_blocking_key = build_alias_blocking_key(raw_mention_text)
-        candidates: list[FuzzyCandidate] = []
-        for alias in self._alias_repo.list_all():
-            if self._entity_repo.get(alias.canonical_entity_id) is None:
-                continue
-
-            blocking_key = build_alias_blocking_key(alias.alias_text)
-            score = score_alias_similarity(raw_mention_text, alias.alias_text)
-            if (
-                raw_blocking_key
-                and blocking_key
-                and raw_blocking_key != blocking_key
-                and score < 1.0
-            ):
-                continue
-            if score < self.min_score:
-                continue
-
-            candidates.append(
-                FuzzyCandidate(
-                    canonical_entity_id=alias.canonical_entity_id,
-                    alias_text=alias.alias_text,
-                    alias_type=alias.alias_type,
-                    score=score,
-                    source="splink",
-                    blocking_key=blocking_key or None,
-                )
-            )
-
-        return _dedupe_sort_and_limit_candidates(candidates, limit)
+        raise NotImplementedError(
+            "SplinkFuzzyMatcher requires a real Splink candidate generator; "
+            "use SimpleFuzzyMatcher for local heuristic matching",
+        )
 
     def _ensure_splink_available(self) -> None:
         if self._splink_checked:
@@ -154,7 +194,7 @@ class SplinkFuzzyMatcher:
         except ImportError as exc:
             raise FuzzyMatcherUnavailable(
                 "Splink is not installed; install entity-registry with the "
-                "'fuzzy' extra or use NullFuzzyMatcher"
+                "'fuzzy' extra or use SimpleFuzzyMatcher"
             ) from exc
         self._splink_checked = True
 
@@ -233,6 +273,7 @@ __all__ = [
     "FuzzyMatcher",
     "FuzzyMatcherUnavailable",
     "NullFuzzyMatcher",
+    "SimpleFuzzyMatcher",
     "SplinkFuzzyMatcher",
     "build_alias_blocking_key",
     "score_alias_similarity",

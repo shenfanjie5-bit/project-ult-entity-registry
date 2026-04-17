@@ -22,6 +22,7 @@ from entity_registry.fuzzy import (
     FuzzyMatcher,
     FuzzyMatcherUnavailable,
     NullFuzzyMatcher,
+    SimpleFuzzyMatcher,
     SplinkFuzzyMatcher,
 )
 from entity_registry.llm_client import (
@@ -125,6 +126,7 @@ __all__ = [
     "ResolutionContext",
     "ResolutionDecision",
     "ResolutionMethod",
+    "SimpleFuzzyMatcher",
     "StockBasicRecord",
     "StockBasicSnapshotReader",
     "SplinkFuzzyMatcher",
