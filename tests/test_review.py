@@ -495,6 +495,60 @@ def test_review_completion_failure_rolls_back_audit_and_alias() -> None:
     assert alias_repo.list_all() == []
 
 
+def test_non_in_memory_transactional_repositories_roll_back_alias_failure() -> None:
+    review_repo, item = queued_item(raw_mention_text="宁德时代新能源")
+    claim_review_item(item.queue_item_id, "reviewer-a", review_repo=review_repo)
+    entity_repo = InMemoryEntityRepository()
+    entity_repo.save(make_entity("ENT_STOCK_300750.SZ"))
+    alias_repo = PartiallyFailingTransactionalAliasRepository()
+    audit_writer = TransactionalAuditWriter()
+
+    with pytest.raises(RuntimeError, match="alias failed after write"):
+        submit_manual_review_decision(
+            item.queue_item_id,
+            ManualReviewDecision(
+                selected_entity_id="ENT_STOCK_300750.SZ",
+                confidence=0.9,
+                rationale="reviewer selected A-share listing",
+                promote_alias=True,
+                alias_type=AliasType.SHORT_NAME,
+            ),
+            review_repo=review_repo,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            audit_writer=audit_writer,
+        )
+
+    unchanged = review_repo.get(item.queue_item_id)
+    assert unchanged.status == REVIEW_STATUS_CLAIMED
+    assert audit_writer.references == {}
+    assert audit_writer.cases == {}
+    assert alias_repo.aliases == []
+
+
+def test_non_transactional_audit_writer_is_rejected_before_side_effects() -> None:
+    review_repo, item = queued_item()
+    audit_writer = NonTransactionalAuditWriter()
+
+    with pytest.raises(TypeError, match="transactional audit and alias"):
+        submit_manual_review_decision(
+            item.queue_item_id,
+            ManualReviewDecision(
+                selected_entity_id=None,
+                confidence=None,
+                rationale="not resolvable",
+            ),
+            review_repo=review_repo,
+            entity_repo=InMemoryEntityRepository(),
+            alias_repo=InMemoryAliasRepository(),
+            audit_writer=audit_writer,
+        )
+
+    assert review_repo.get(item.queue_item_id).status == REVIEW_STATUS_PENDING
+    assert audit_writer.references == {}
+    assert audit_writer.cases == {}
+
+
 def test_concurrent_manual_decision_writes_only_one_audit_record() -> None:
     review_repo, item = queued_item(
         candidate_entity_ids=["ENT_STOCK_300750.SZ", "ENT_STOCK_03750.HK"]
@@ -773,6 +827,13 @@ class FailingAuditWriter:
     ) -> None:
         raise RuntimeError("audit failed")
 
+    def rollback_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        return None
+
 
 class FailingAliasRepository(InMemoryAliasRepository):
     def save_if_absent(self, alias) -> bool:
@@ -782,6 +843,83 @@ class FailingAliasRepository(InMemoryAliasRepository):
 class FailingTerminalReviewRepository(InMemoryReviewRepository):
     def _save_terminal_unchecked(self, item: UnresolvedQueueItem) -> None:
         raise RuntimeError("review completion failed")
+
+
+class TransactionalAuditWriter:
+    def __init__(self) -> None:
+        self.references: dict[str, EntityReference] = {}
+        self.cases: dict[str, ResolutionCase] = {}
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        self.references[reference.reference_id] = reference
+        self.cases[case.case_id] = case
+
+    def rollback_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        self.references.pop(reference.reference_id, None)
+        self.cases.pop(case.case_id, None)
+
+
+class NonTransactionalAuditWriter:
+    def __init__(self) -> None:
+        self.references: dict[str, EntityReference] = {}
+        self.cases: dict[str, ResolutionCase] = {}
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        self.references[reference.reference_id] = reference
+        self.cases[case.case_id] = case
+
+
+class PartiallyFailingTransactionalAliasRepository:
+    def __init__(self) -> None:
+        self.aliases: list = []
+
+    def find_by_text(self, alias_text: str) -> list:
+        return [alias for alias in self.aliases if alias.alias_text == alias_text]
+
+    def find_by_entity(self, entity_id: str) -> list:
+        return [
+            alias
+            for alias in self.aliases
+            if alias.canonical_entity_id == entity_id
+        ]
+
+    def list_all(self) -> list:
+        return list(self.aliases)
+
+    def save(self, alias) -> None:
+        self.save_if_absent(alias)
+
+    def save_if_absent(self, alias) -> bool:
+        self.aliases.append(alias)
+        raise RuntimeError("alias failed after write")
+
+    def save_batch(self, aliases: list) -> None:
+        for alias in aliases:
+            self.save(alias)
+
+    def save_batch_if_absent(self, aliases: list) -> int:
+        for alias in aliases:
+            self.save_if_absent(alias)
+        return len(aliases)
+
+    def rollback_alias(self, alias) -> None:
+        self.aliases = [
+            existing
+            for existing in self.aliases
+            if existing != alias
+        ]
 
 
 class BlockingAuditWriter(InMemoryResolutionAuditReferenceRepository):

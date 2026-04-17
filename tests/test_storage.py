@@ -477,44 +477,67 @@ def test_in_memory_review_repository_complete_decision_is_atomic() -> None:
     repository = InMemoryReviewRepository()
     item = make_queue_item("queue-1", "ref-1")
     repository.save(item)
-    persisted: list[str] = []
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = InMemoryResolutionAuditReferenceRepository(case_repo)
+    alias_repo = InMemoryAliasRepository()
 
-    completed = repository.complete_decision(
+    def build_records(current: UnresolvedQueueItem):
+        return (
+            make_reference(current.reference_id, "ENT_STOCK_300750.SZ"),
+            make_case("case-review", current.reference_id, "ENT_STOCK_300750.SZ"),
+            None,
+        )
+
+    completed, reference, case = repository.complete_decision(
         "queue-1",
         REVIEW_STATUS_PROMOTED,
-        lambda current: persisted.append(current.queue_item_id),
+        build_records,
+        audit_writer=audit_writer,
+        alias_repo=alias_repo,
     )
 
     assert completed.status == REVIEW_STATUS_PROMOTED
     assert completed.decided_at is not None
-    assert persisted == ["queue-1"]
+    assert audit_writer.get("ref-1") == reference
+    assert case_repo.get("case-review") == case
     with pytest.raises(ReviewStateError):
         repository.complete_decision(
             "queue-1",
             REVIEW_STATUS_REJECTED,
-            lambda current: persisted.append(current.queue_item_id),
+            build_records,
+            audit_writer=audit_writer,
+            alias_repo=alias_repo,
         )
-    assert persisted == ["queue-1"]
+    assert len(case_repo.find_by_reference("ref-1")) == 1
 
 
 def test_in_memory_review_repository_complete_decision_rolls_back_on_save_failure() -> None:
     repository = FailingTerminalReviewRepository()
     item = make_queue_item("queue-1", "ref-1")
     repository.save(item)
-    persisted: list[str] = []
-    rolled_back: list[str] = []
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = InMemoryResolutionAuditReferenceRepository(case_repo)
+    alias_repo = InMemoryAliasRepository()
+
+    def build_records(current: UnresolvedQueueItem):
+        return (
+            make_reference(current.reference_id, "ENT_STOCK_300750.SZ"),
+            make_case("case-review", current.reference_id, "ENT_STOCK_300750.SZ"),
+            None,
+        )
 
     with pytest.raises(RuntimeError, match="terminal save failed"):
         repository.complete_decision(
             "queue-1",
             REVIEW_STATUS_PROMOTED,
-            lambda current: persisted.append(current.queue_item_id),
-            lambda: rolled_back.append("rollback"),
+            build_records,
+            audit_writer=audit_writer,
+            alias_repo=alias_repo,
         )
 
     assert repository.get("queue-1") == item
-    assert persisted == ["queue-1"]
-    assert rolled_back == ["rollback"]
+    assert audit_writer.get("ref-1") is None
+    assert case_repo.find_by_reference("ref-1") == []
 
 
 class FailingResolutionCaseRepository(InMemoryResolutionCaseRepository):

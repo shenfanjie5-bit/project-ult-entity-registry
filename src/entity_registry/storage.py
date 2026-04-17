@@ -11,7 +11,7 @@ from entity_registry.core import CanonicalEntity, EntityAlias
 from entity_registry.references import EntityReference, ResolutionCase
 
 if TYPE_CHECKING:
-    from entity_registry.review import UnresolvedQueueItem
+    from entity_registry.review import ReviewAuditWriter, UnresolvedQueueItem
 
 
 def _utcnow() -> datetime:
@@ -76,8 +76,8 @@ class ReviewRepository(Protocol):
     """Storage contract for manual review queue items.
 
     ``complete_decision`` must validate and complete a queue item atomically
-    with the supplied persistence callback. If persistence or terminal save
-    fails, it must call the rollback callback before re-raising.
+    with the supplied audit and alias repositories. If any write fails, the
+    implementation must roll back earlier writes before re-raising.
     """
 
     def save(self, item: UnresolvedQueueItem) -> None: ...
@@ -99,9 +99,14 @@ class ReviewRepository(Protocol):
         self,
         queue_item_id: str,
         terminal_status: str,
-        persist: Callable[[UnresolvedQueueItem], None],
-        rollback: Callable[[], None] | None = None,
-    ) -> UnresolvedQueueItem: ...
+        build_records: Callable[
+            [UnresolvedQueueItem],
+            tuple[EntityReference, ResolutionCase, EntityAlias | None],
+        ],
+        *,
+        audit_writer: ReviewAuditWriter,
+        alias_repo: AliasRepository,
+    ) -> tuple[UnresolvedQueueItem, EntityReference, ResolutionCase]: ...
 
 
 class InMemoryEntityRepository:
@@ -385,9 +390,14 @@ class InMemoryReviewRepository:
         self,
         queue_item_id: str,
         terminal_status: str,
-        persist: Callable[[UnresolvedQueueItem], None],
-        rollback: Callable[[], None] | None = None,
-    ) -> UnresolvedQueueItem:
+        build_records: Callable[
+            [UnresolvedQueueItem],
+            tuple[EntityReference, ResolutionCase, EntityAlias | None],
+        ],
+        *,
+        audit_writer: ReviewAuditWriter,
+        alias_repo: AliasRepository,
+    ) -> tuple[UnresolvedQueueItem, EntityReference, ResolutionCase]:
         """Complete one decision while holding the review item lock."""
 
         from entity_registry.review import ReviewNotFoundError, ReviewStateError
@@ -419,14 +429,26 @@ class InMemoryReviewRepository:
                     "decided_at": now,
                 }
             )
+            reference, case, alias = build_records(item)
+            rollback = _decision_rollback(
+                audit_writer,
+                alias_repo,
+                alias_required=alias is not None,
+            )
+            if rollback is None:
+                raise TypeError(
+                    "manual review decisions require transactional audit and "
+                    "alias repositories"
+                )
             try:
-                persist(item)
+                audit_writer.save_resolution(reference, case)
+                if alias is not None:
+                    alias_repo.save_if_absent(alias)
                 self._save_terminal_unchecked(updated)
             except Exception:
-                if rollback is not None:
-                    rollback()
+                rollback(reference, case, alias)
                 raise
-            return updated
+            return updated, reference, case
 
     def _save_unchecked(self, item: UnresolvedQueueItem) -> None:
         existing_id = self._by_reference.get(item.reference_id)
@@ -442,6 +464,133 @@ class InMemoryReviewRepository:
 
     def _save_terminal_unchecked(self, item: UnresolvedQueueItem) -> None:
         self._save_unchecked(item)
+
+
+type _DecisionRollback = Callable[
+    [EntityReference, ResolutionCase, EntityAlias | None],
+    None,
+]
+
+
+def _decision_rollback(
+    audit_writer: "ReviewAuditWriter",
+    alias_repo: AliasRepository,
+    *,
+    alias_required: bool,
+) -> _DecisionRollback | None:
+    audit_rollback = getattr(audit_writer, "rollback_resolution", None)
+    alias_rollback = getattr(alias_repo, "rollback_alias", None)
+    audit_snapshot = (
+        None
+        if callable(audit_rollback)
+        else _snapshot_audit_writer(audit_writer)
+    )
+    alias_snapshot = (
+        None
+        if callable(alias_rollback)
+        else _snapshot_alias_repository(alias_repo)
+    )
+
+    if not callable(audit_rollback) and audit_snapshot is None:
+        return None
+    if alias_required and not callable(alias_rollback) and alias_snapshot is None:
+        return None
+
+    def rollback(
+        reference: EntityReference,
+        case: ResolutionCase,
+        alias: EntityAlias | None,
+    ) -> None:
+        if alias is not None:
+            if callable(alias_rollback):
+                alias_rollback(alias)
+            else:
+                _restore_alias_repository(alias_repo, alias_snapshot)
+
+        if callable(audit_rollback):
+            audit_rollback(reference, case)
+        else:
+            _restore_audit_writer(audit_writer, audit_snapshot)
+
+    return rollback
+
+
+def _snapshot_audit_writer(
+    audit_writer: "ReviewAuditWriter",
+) -> tuple[dict[str, EntityReference], dict[str, ResolutionCase]] | None:
+    references = getattr(audit_writer, "_references", None)
+    case_repo = getattr(audit_writer, "_case_repo", None)
+    cases = getattr(case_repo, "_cases", None)
+    if isinstance(references, dict) and isinstance(cases, dict):
+        return (dict(references), dict(cases))
+    return None
+
+
+def _restore_audit_writer(
+    audit_writer: "ReviewAuditWriter",
+    snapshot: tuple[dict[str, EntityReference], dict[str, ResolutionCase]] | None,
+) -> None:
+    if snapshot is None:
+        return
+
+    references = getattr(audit_writer, "_references", None)
+    case_repo = getattr(audit_writer, "_case_repo", None)
+    cases = getattr(case_repo, "_cases", None)
+    if isinstance(references, dict) and isinstance(cases, dict):
+        references.clear()
+        references.update(snapshot[0])
+        cases.clear()
+        cases.update(snapshot[1])
+
+
+def _snapshot_alias_repository(
+    alias_repo: AliasRepository,
+) -> tuple[
+    dict[str, list[EntityAlias]],
+    dict[str, list[EntityAlias]],
+    set[tuple[str, str, str]],
+] | None:
+    by_text = getattr(alias_repo, "_by_text", None)
+    by_entity = getattr(alias_repo, "_by_entity", None)
+    semantic_keys = getattr(alias_repo, "_semantic_keys", None)
+    if (
+        isinstance(by_text, dict)
+        and isinstance(by_entity, dict)
+        and isinstance(semantic_keys, set)
+    ):
+        return (
+            {key: list(value) for key, value in by_text.items()},
+            {key: list(value) for key, value in by_entity.items()},
+            set(semantic_keys),
+        )
+    return None
+
+
+def _restore_alias_repository(
+    alias_repo: AliasRepository,
+    snapshot: tuple[
+        dict[str, list[EntityAlias]],
+        dict[str, list[EntityAlias]],
+        set[tuple[str, str, str]],
+    ] | None,
+) -> None:
+    if snapshot is None:
+        return
+
+    by_text = getattr(alias_repo, "_by_text", None)
+    by_entity = getattr(alias_repo, "_by_entity", None)
+    semantic_keys = getattr(alias_repo, "_semantic_keys", None)
+    if (
+        isinstance(by_text, dict)
+        and isinstance(by_entity, dict)
+        and isinstance(semantic_keys, set)
+    ):
+        by_text.clear()
+        by_text.update({key: list(value) for key, value in snapshot[0].items()})
+        by_entity.clear()
+        by_entity.update({key: list(value) for key, value in snapshot[1].items()})
+        semantic_keys.clear()
+        semantic_keys.update(snapshot[2])
 
 
 def _alias_semantic_key(alias: EntityAlias) -> tuple[str, str, str]:
