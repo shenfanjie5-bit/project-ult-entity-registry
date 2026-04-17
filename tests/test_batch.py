@@ -699,6 +699,39 @@ def test_batch_resolve_with_report_rejects_duplicate_reference_ids_before_writes
     assert review_repo.list_by_status("pending") == []
 
 
+def test_batch_resolve_with_report_rejects_embedded_invalid_reference_ids_before_writes() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(ValueError, match="source_reference_id.*non-empty"):
+        batch_resolve_with_report(
+            [
+                {
+                    "raw_mention_text": "Unlisted Before Malformed Ref",
+                    "source_context": {"offset": 1},
+                },
+                {
+                    "reference_id": "   ",
+                    "raw_mention_text": "Malformed Embedded Ref",
+                    "source_context": {"offset": 2},
+                },
+            ],
+            review_repo=review_repo,
+        )
+
+    assert reference_repo._references == {}
+    assert case_repo._cases == {}
+    assert review_repo.list_by_status("pending") == []
+
+
 def test_manual_review_routing_keeps_a_h_shared_short_name_unresolved() -> None:
     entity_repo, alias_repo = initialized_repositories()
     case_repo = InMemoryResolutionCaseRepository()

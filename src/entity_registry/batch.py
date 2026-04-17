@@ -63,6 +63,15 @@ class BatchReferenceInput(BaseModel):
             raise ValueError("raw_mention_text must be a non-empty string")
         return value
 
+    @field_validator("source_reference_id")
+    @classmethod
+    def validate_source_reference_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("source_reference_id must be a non-empty string")
+        return value
+
 
 class BatchCandidateGroup(BaseModel):
     """Candidate group shared by one or more unresolved references."""
