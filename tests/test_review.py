@@ -48,6 +48,8 @@ from entity_registry.storage import (
     InMemoryReviewRepository,
 )
 
+REFERENCE_CREATED_AT = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
+
 
 def test_review_public_exports_and_signatures() -> None:
     assert entity_registry.UnresolvedQueueItem is UnresolvedQueueItem
@@ -286,6 +288,36 @@ def test_reject_decision_writes_unresolved_audit_and_marks_rejected() -> None:
     assert saved_case.selected_entity_id is None
     assert updated_item.status == REVIEW_STATUS_REJECTED
     assert updated_item.decided_at is not None
+
+
+def test_manual_review_decision_rejects_missing_reference_created_at() -> None:
+    review_repo, item = queued_item()
+    missing_timestamp_item = item.model_copy(
+        update={"reference_created_at": None}
+    )
+    review_repo.save(missing_timestamp_item)
+    case_repo = InMemoryResolutionCaseRepository()
+    audit_writer = InMemoryResolutionAuditReferenceRepository(case_repo)
+
+    with pytest.raises(ReviewStateError, match="reference_created_at"):
+        submit_manual_review_decision(
+            item.queue_item_id,
+            ManualReviewDecision(
+                selected_entity_id=None,
+                confidence=None,
+                rationale="cannot audit without original capture timestamp",
+            ),
+            review_repo=review_repo,
+            entity_repo=InMemoryEntityRepository(),
+            alias_repo=InMemoryAliasRepository(),
+            audit_writer=audit_writer,
+        )
+
+    unchanged = review_repo.get(item.queue_item_id)
+    assert unchanged.status == REVIEW_STATUS_PENDING
+    assert unchanged.reference_created_at is None
+    assert audit_writer.get(item.reference_id) is None
+    assert case_repo.find_by_reference(item.reference_id) == []
 
 
 def test_promote_decision_writes_manual_resolution_for_existing_entity() -> None:
@@ -760,6 +792,7 @@ def queued_item(
         reference_id="ref-review",
         raw_mention_text=raw_mention_text,
         source_context={"document_id": "doc-review"},
+        reference_created_at=REFERENCE_CREATED_AT,
         candidate_entity_ids=(
             ["ENT_STOCK_300750.SZ"]
             if candidate_entity_ids is None
@@ -784,6 +817,7 @@ def queued_item_with_repository(
         reference_id="ref-review",
         raw_mention_text=raw_mention_text,
         source_context={"document_id": "doc-review"},
+        reference_created_at=REFERENCE_CREATED_AT,
         candidate_entity_ids=(
             ["ENT_STOCK_300750.SZ"]
             if candidate_entity_ids is None

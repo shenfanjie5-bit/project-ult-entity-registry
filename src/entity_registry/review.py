@@ -405,7 +405,12 @@ def _reference_for_decision(
 
 
 def _reference_created_at_for_item(item: UnresolvedQueueItem) -> datetime:
-    return item.reference_created_at or item.created_at
+    if item.reference_created_at is None:
+        raise ReviewStateError(
+            "review queue item is missing original reference_created_at: "
+            f"{item.queue_item_id}"
+        )
+    return item.reference_created_at
 
 
 def _manual_confidence(decision: ManualReviewDecision) -> float:
