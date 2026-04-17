@@ -13,6 +13,7 @@ from entity_registry.batch import (
     BatchResolutionOutcome,
     BatchResolutionReport,
     batch_resolve,
+    batch_resolve_with_report,
     cluster_unresolved_references,
     collect_unresolved_references,
     run_batch_resolution_job,
@@ -34,6 +35,7 @@ from entity_registry.storage import (
     InMemoryAliasRepository,
     InMemoryEntityRepository,
     InMemoryReferenceRepository,
+    InMemoryReviewRepository,
     InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
 )
@@ -51,9 +53,26 @@ def reset_public_repositories() -> Iterator[None]:
 
 def test_batch_resolve_public_signature_and_exports() -> None:
     signature = inspect.signature(batch_resolve)
+    report_signature = inspect.signature(batch_resolve_with_report)
 
     assert list(signature.parameters) == ["references"]
+    assert list(report_signature.parameters) == [
+        "references",
+        "review_repo",
+        "reference_ids",
+    ]
+    assert (
+        report_signature.parameters["review_repo"].kind
+        is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert report_signature.parameters["review_repo"].default is None
+    assert (
+        report_signature.parameters["reference_ids"].kind
+        is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert report_signature.parameters["reference_ids"].default is None
     assert entity_registry.batch_resolve is batch_resolve
+    assert entity_registry.batch_resolve_with_report is batch_resolve_with_report
     assert entity_registry.BatchReferenceInput is BatchReferenceInput
     assert entity_registry.BatchCandidateGroup is BatchCandidateGroup
     assert entity_registry.BatchResolutionOutcome is BatchResolutionOutcome
@@ -447,6 +466,305 @@ def test_public_batch_resolve_uses_configured_ner_fuzzy_reasoner_and_audit() -> 
     assert list(reference_repo._references.values())[0].source_context == {"market": "HK"}
 
 
+def test_batch_resolve_with_report_enqueues_review_items_and_supports_decisions() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    fuzzy_matcher = RecordingFuzzyMatcher(
+        {
+            "宁德时代新能源": [
+                make_candidate(
+                    "ENT_STOCK_300750.SZ",
+                    score=0.91,
+                    alias_text="宁德时代新能源科技股份有限公司",
+                ),
+                make_candidate(
+                    "ENT_STOCK_03750.HK",
+                    score=0.90,
+                    alias_text="宁德时代新能源科技股份有限公司",
+                ),
+            ]
+        }
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        fuzzy_matcher=fuzzy_matcher,
+    )
+
+    report = batch_resolve_with_report(
+        [
+            {
+                "raw_mention_text": "宁德时代",
+                "source_context": {"document_id": "doc-review", "path": "reject"},
+            },
+            {
+                "raw_mention_text": "宁德时代新能源",
+                "source_context": {"document_id": "doc-review", "path": "promote"},
+            },
+        ],
+        review_repo=review_repo,
+    )
+
+    assert len(report.manual_review_reference_ids) == 2
+    assert set(report.unresolved_reference_ids) == set(
+        report.manual_review_reference_ids
+    )
+    grouped_reference_ids = {
+        reference_id
+        for group in report.groups
+        for reference_id in group.reference_ids
+    }
+    assert set(report.manual_review_reference_ids) <= grouped_reference_ids
+
+    reject_reference_id, promote_reference_id = report.manual_review_reference_ids
+    reject_item = review_repo.find_by_reference(reject_reference_id)
+    promote_item = review_repo.find_by_reference(promote_reference_id)
+    assert reject_item is not None
+    assert promote_item is not None
+    assert reference_repo.get(reject_reference_id).raw_mention_text == "宁德时代"
+    assert reference_repo.get(promote_reference_id).raw_mention_text == (
+        "宁德时代新能源"
+    )
+
+    entity_registry.claim_review_item(
+        reject_item.queue_item_id,
+        "reviewer-a",
+        review_repo=review_repo,
+    )
+    rejected_payload = entity_registry.submit_manual_review_decision(
+        reject_item.queue_item_id,
+        entity_registry.ManualReviewDecision(
+            selected_entity_id=None,
+            confidence=None,
+            rationale="not enough evidence to map to a listing",
+        ),
+        review_repo=review_repo,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_writer=reference_repo,
+    )
+
+    entity_registry.claim_review_item(
+        promote_item.queue_item_id,
+        "reviewer-b",
+        review_repo=review_repo,
+    )
+    promoted_payload = entity_registry.submit_manual_review_decision(
+        promote_item.queue_item_id,
+        entity_registry.ManualReviewDecision(
+            selected_entity_id="ENT_STOCK_300750.SZ",
+            confidence=0.93,
+            rationale="reviewer selected the A-share listing",
+            promote_alias=True,
+            alias_type=AliasType.SHORT_NAME,
+        ),
+        review_repo=review_repo,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_writer=reference_repo,
+    )
+
+    rejected_audit = entity_registry.get_resolution_audit_payload(
+        reject_reference_id,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+    promoted_audit = entity_registry.get_resolution_audit_payload(
+        promote_reference_id,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+    manual_aliases = [
+        alias
+        for alias in alias_repo.find_by_entity("ENT_STOCK_300750.SZ")
+        if alias.alias_text == "宁德时代新能源"
+        and alias.source == "manual_review"
+    ]
+
+    assert rejected_payload.unresolved is True
+    assert rejected_audit.entity_reference.resolution_method is (
+        ResolutionMethod.UNRESOLVED
+    )
+    assert rejected_audit.queue_item.status == "rejected"
+    assert promoted_payload.unresolved is False
+    assert promoted_audit.entity_reference.resolved_entity_id == "ENT_STOCK_300750.SZ"
+    assert promoted_audit.entity_reference.resolution_method is ResolutionMethod.MANUAL
+    assert promoted_audit.queue_item.status == "promoted"
+    assert len(manual_aliases) == 1
+
+
+def test_batch_resolve_with_report_returns_report_when_review_enqueue_fails() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = FailingAfterSaveCountReviewRepository(fail_after=1)
+    reference_ids = ["ref-review-retry-a", "ref-review-retry-b"]
+    inputs = [
+        {
+            "raw_mention_text": "Unlisted Retry A",
+            "source_context": {"document_id": "doc-retry", "offset": 1},
+        },
+        {
+            "raw_mention_text": "Unlisted Retry B",
+            "source_context": {"document_id": "doc-retry", "offset": 2},
+        },
+    ]
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    report = batch_resolve_with_report(
+        inputs,
+        review_repo=review_repo,
+        reference_ids=reference_ids,
+    )
+
+    assert report.manual_review_reference_ids == reference_ids
+    assert report.unresolved_reference_ids == reference_ids
+    assert report.job.status == "failed"
+    assert len(report.errors) == 1
+    assert "manual review enqueue failed" in report.errors[0]
+    assert "review save failed" in report.errors[0]
+    assert review_repo.find_by_reference(reference_ids[0]) is not None
+    assert review_repo.find_by_reference(reference_ids[1]) is None
+    assert {
+        reference.reference_id
+        for reference in reference_repo._references.values()
+    } == set(reference_ids)
+    assert all(
+        case_repo.find_by_reference(reference_id)
+        for reference_id in reference_ids
+    )
+
+    review_repo.fail_after = None
+    entity_registry.enqueue_batch_manual_review(
+        report,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+
+    assert review_repo.find_by_reference(reference_ids[0]) is not None
+    assert review_repo.find_by_reference(reference_ids[1]) is not None
+
+    retry_report = batch_resolve_with_report(
+        inputs,
+        review_repo=review_repo,
+        reference_ids=reference_ids,
+    )
+
+    assert retry_report.manual_review_reference_ids == reference_ids
+    assert set(reference_repo._references) == set(reference_ids)
+
+
+def test_batch_resolve_with_report_rejects_duplicate_reference_ids_before_writes() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(ValueError, match="duplicate source_reference_id"):
+        batch_resolve_with_report(
+            [
+                {
+                    "raw_mention_text": "Duplicate Ref A",
+                    "source_context": {"offset": 1},
+                },
+                {
+                    "raw_mention_text": "Duplicate Ref B",
+                    "source_context": {"offset": 2},
+                },
+            ],
+            review_repo=review_repo,
+            reference_ids=["ref-duplicate", "ref-duplicate"],
+        )
+
+    assert reference_repo._references == {}
+    assert case_repo._cases == {}
+    assert review_repo.list_by_status("pending") == []
+
+
+def test_batch_resolve_with_report_rejects_duplicate_identical_reference_ids_before_writes() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(ValueError, match="duplicate source_reference_id"):
+        batch_resolve_with_report(
+            [
+                {
+                    "raw_mention_text": "Duplicate Identical Ref",
+                    "source_context": {"offset": 1},
+                },
+                {
+                    "raw_mention_text": "Duplicate Identical Ref",
+                    "source_context": {"offset": 1},
+                },
+            ],
+            review_repo=review_repo,
+            reference_ids=["ref-duplicate-identical", "ref-duplicate-identical"],
+        )
+
+    assert reference_repo._references == {}
+    assert case_repo._cases == {}
+    assert review_repo.list_by_status("pending") == []
+
+
+def test_batch_resolve_with_report_rejects_embedded_invalid_reference_ids_before_writes() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(ValueError, match="source_reference_id.*non-empty"):
+        batch_resolve_with_report(
+            [
+                {
+                    "raw_mention_text": "Unlisted Before Malformed Ref",
+                    "source_context": {"offset": 1},
+                },
+                {
+                    "reference_id": "   ",
+                    "raw_mention_text": "Malformed Embedded Ref",
+                    "source_context": {"offset": 2},
+                },
+            ],
+            review_repo=review_repo,
+        )
+
+    assert reference_repo._references == {}
+    assert case_repo._cases == {}
+    assert review_repo.list_by_status("pending") == []
+
+
 def test_manual_review_routing_keeps_a_h_shared_short_name_unresolved() -> None:
     entity_repo, alias_repo = initialized_repositories()
     case_repo = InMemoryResolutionCaseRepository()
@@ -623,6 +941,19 @@ class FailingAuditReferenceRepository(InMemoryResolutionAuditReferenceRepository
         case: ResolutionCase,
     ) -> None:
         raise RuntimeError("audit failed")
+
+
+class FailingAfterSaveCountReviewRepository(InMemoryReviewRepository):
+    def __init__(self, *, fail_after: int | None) -> None:
+        super().__init__()
+        self.fail_after = fail_after
+        self.save_attempts = 0
+
+    def save(self, item: entity_registry.UnresolvedQueueItem) -> None:
+        self.save_attempts += 1
+        if self.fail_after is not None and self.save_attempts > self.fail_after:
+            raise RuntimeError("review save failed")
+        super().save(item)
 
 
 class StaticNERExtractor:

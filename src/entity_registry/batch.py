@@ -28,10 +28,20 @@ from entity_registry.resolution_types import (
     MentionResolutionResult,
     ResolutionContext,
 )
-from entity_registry.storage import ReferenceRepository
+from entity_registry.storage import (
+    ReferenceRepository,
+    ResolutionCaseRepository,
+    ReviewRepository,
+)
 
 
 _DEFAULT_RESOLVE_MENTION = resolve_mention
+_RESOLUTION_REPOSITORIES_REQUIRED_MESSAGE = (
+    "resolution audit repositories are not configured; "
+    "call configure_default_repositories(..., reference_repo=..., "
+    "case_repo=...) before using public resolution APIs, or use "
+    "configure_default_in_memory_audit_repositories() for tests/local workflows"
+)
 
 Resolver = Callable[
     ...,
@@ -51,6 +61,15 @@ class BatchReferenceInput(BaseModel):
     def validate_raw_mention_text(cls, value: str) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("raw_mention_text must be a non-empty string")
+        return value
+
+    @field_validator("source_reference_id")
+    @classmethod
+    def validate_source_reference_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("source_reference_id must be a non-empty string")
         return value
 
 
@@ -238,24 +257,179 @@ def run_batch_resolution_job(
 def batch_resolve(
     references: Sequence[EntityReference | dict[str, object] | str],
 ) -> list[MentionResolutionResult]:
-    """Resolve a batch of mentions and return the stable public result shape."""
+    """Resolve a batch of mentions and return the stable public result shape.
+
+    Use batch_resolve_with_report(..., review_repo=...) when callers need the
+    report fields required for manual-review handoff.
+    """
 
     normalized_inputs = [_coerce_reference_input(reference) for reference in references]
-    job = BatchResolutionJob(
+    job = _new_batch_job(normalized_inputs)
+    report = run_batch_resolution_job(job, normalized_inputs)
+    _raise_for_report_errors(report)
+    return [outcome.result for outcome in report.outcomes]
+
+
+def batch_resolve_with_report(
+    references: Sequence[EntityReference | dict[str, object] | str],
+    *,
+    review_repo: ReviewRepository | None = None,
+    reference_ids: Sequence[str | None] | None = None,
+) -> BatchResolutionReport:
+    """Resolve a batch and return the manual-review handoff report.
+
+    Anonymous dict/string inputs are assigned durable reference IDs before
+    resolution. Callers can pass reference_ids to make those assignments stable
+    across retry attempts.
+
+    When review_repo is provided, unresolved outputs are enqueued before this
+    function returns. If enqueue fails after audit persistence, the returned
+    report records the enqueue error so callers can retry
+    enqueue_batch_manual_review(report, ...) with the same configured reference
+    and case repositories.
+    """
+
+    repository_context = _get_default_resolution_repository_context()
+    normalized_inputs = _ensure_source_reference_ids(
+        [_coerce_reference_input(reference) for reference in references],
+        reference_ids=reference_ids,
+    )
+    job = _new_batch_job(normalized_inputs)
+    report = run_batch_resolution_job(
+        job,
+        normalized_inputs,
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+    )
+    _raise_for_report_errors(report)
+
+    if review_repo is not None:
+        _enqueue_manual_review_items(
+            report,
+            reference_repo=repository_context.reference_repo,
+            case_repo=repository_context.case_repo,
+            review_repo=review_repo,
+        )
+
+    return report
+
+
+def _new_batch_job(inputs: Sequence[BatchReferenceInput]) -> BatchResolutionJob:
+    return BatchResolutionJob(
         job_id=_new_job_id(),
         reference_ids=_unique_ids([
             item.source_reference_id
-            for item in normalized_inputs
+            for item in inputs
             if item.source_reference_id is not None
         ]),
         status="pending",
     )
-    report = run_batch_resolution_job(job, normalized_inputs)
+
+
+def _ensure_source_reference_ids(
+    inputs: Sequence[BatchReferenceInput],
+    *,
+    reference_ids: Sequence[str | None] | None = None,
+) -> list[BatchReferenceInput]:
+    if reference_ids is not None and len(reference_ids) != len(inputs):
+        raise ValueError("reference_ids length must match references length")
+
+    normalized: list[BatchReferenceInput] = []
+    for index, item in enumerate(inputs):
+        supplied_reference_id = (
+            None if reference_ids is None else reference_ids[index]
+        )
+        if supplied_reference_id is not None:
+            if (
+                not isinstance(supplied_reference_id, str)
+                or not supplied_reference_id.strip()
+            ):
+                raise ValueError("reference_ids must contain non-empty strings")
+
+        if item.source_reference_id is not None:
+            if (
+                supplied_reference_id is not None
+                and supplied_reference_id != item.source_reference_id
+            ):
+                raise ValueError(
+                    "reference_ids cannot override an input source_reference_id"
+                )
+            normalized.append(item)
+            continue
+
+        normalized.append(
+            item.model_copy(
+                update={
+                    "source_reference_id": (
+                        supplied_reference_id or _new_batch_reference_id()
+                    ),
+                },
+            )
+        )
+    _validate_effective_reference_ids(normalized)
+    return normalized
+
+
+def _validate_effective_reference_ids(inputs: Sequence[BatchReferenceInput]) -> None:
+    seen_by_reference_id: dict[str, BatchReferenceInput] = {}
+    for item in inputs:
+        if item.source_reference_id is None:
+            continue
+
+        existing = seen_by_reference_id.get(item.source_reference_id)
+        if existing is None:
+            seen_by_reference_id[item.source_reference_id] = item
+            continue
+
+        raise ValueError(
+            "duplicate source_reference_id in batch inputs: "
+            f"{item.source_reference_id}"
+        )
+
+
+def _enqueue_manual_review_items(
+    report: BatchResolutionReport,
+    *,
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+    review_repo: ReviewRepository,
+) -> None:
+    from entity_registry.review import enqueue_batch_manual_review
+
+    try:
+        enqueue_batch_manual_review(
+            report,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            review_repo=review_repo,
+        )
+    except Exception as exc:
+        error = f"manual review enqueue failed: {type(exc).__name__}: {exc}"
+        report.errors.append(error)
+        _mark_job_failed(report.job, error)
+
+
+def _get_default_resolution_repository_context():
+    from entity_registry.init import (
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
+    )
+
+    repository_context = _get_default_repository_context()
+    if (
+        repository_context.reference_repo is None
+        or repository_context.case_repo is None
+    ):
+        raise RepositoryNotConfiguredError(
+            _RESOLUTION_REPOSITORIES_REQUIRED_MESSAGE,
+        )
+    return repository_context
+
+
+def _raise_for_report_errors(report: BatchResolutionReport) -> None:
     if report.errors:
         raise RuntimeError(
             "batch resolution failed: " + "; ".join(report.errors),
         )
-    return [outcome.result for outcome in report.outcomes]
 
 
 def _coerce_reference_input(
@@ -351,23 +525,7 @@ def _resolve_mention_for_batch(
     if existing_reference_id is None:
         return resolve_mention(raw_mention_text, context)
 
-    from entity_registry.init import (
-        RepositoryNotConfiguredError,
-        _get_default_repository_context,
-    )
-
-    repository_context = _get_default_repository_context()
-    if (
-        repository_context.reference_repo is None
-        or repository_context.case_repo is None
-    ):
-        raise RepositoryNotConfiguredError(
-            "resolution audit repositories are not configured; "
-            "call configure_default_repositories(..., reference_repo=..., "
-            "case_repo=...) before using public resolution APIs, or use "
-            "configure_default_in_memory_audit_repositories() for tests/local workflows",
-        )
-
+    repository_context = _get_default_resolution_repository_context()
     return resolve_mention_with_repositories(
         raw_mention_text,
         context,
@@ -584,6 +742,10 @@ def _new_job_id() -> str:
     return f"BATCH_{uuid4().hex}"
 
 
+def _new_batch_reference_id() -> str:
+    return f"REF_{uuid4().hex}"
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -594,6 +756,7 @@ __all__ = [
     "BatchResolutionOutcome",
     "BatchResolutionReport",
     "batch_resolve",
+    "batch_resolve_with_report",
     "cluster_unresolved_references",
     "collect_unresolved_references",
     "run_batch_resolution_job",
