@@ -168,7 +168,7 @@ def test_public_register_unresolved_reference_uses_configured_repository() -> No
         reference_repo=reference_repo,
     )
 
-    reference = entity_registry.register_unresolved_reference(
+    contract_case = entity_registry.register_unresolved_reference(
         {
             "reference_id": "ref-public",
             "raw_mention_text": "Unknown Corp",
@@ -176,8 +176,11 @@ def test_public_register_unresolved_reference_uses_configured_repository() -> No
         }
     )
 
-    assert reference_repo.get("ref-public") == reference
+    reference = reference_repo.get("ref-public")
+    assert reference is not None
     assert reference.resolution_method is ResolutionMethod.UNRESOLVED
+    assert contract_case.decision is entity_registry.EntityResolutionDecision.UNRESOLVED
+    assert contract_case.evidence_refs == ["ref-public"]
 
 
 def test_register_unresolved_reference_into_rejects_resolved_model() -> None:

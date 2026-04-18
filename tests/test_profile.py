@@ -82,5 +82,5 @@ def test_public_get_entity_profile_uses_configured_default_repositories() -> Non
 
     profile = entity_registry.get_entity_profile("ENT_STOCK_000001.SZ")
 
-    assert profile.canonical_entity.display_name == "平安银行"
-    assert {alias.alias_text for alias in profile.aliases} >= {"平安银行", "000001"}
+    assert profile["canonical_entity"].display_name == "平安银行"
+    assert {alias.alias for alias in profile["aliases"]} >= {"平安银行", "000001"}

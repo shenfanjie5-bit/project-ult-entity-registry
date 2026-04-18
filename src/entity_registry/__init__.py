@@ -1,10 +1,13 @@
 """Core public exports for the entity-registry package."""
 
+from __future__ import annotations
+
+from collections.abc import Sequence
+from uuid import uuid4
+
 from entity_registry.core import (
     AliasType,
-    CanonicalEntity,
     DecisionType,
-    EntityAlias,
     EntityStatus,
     EntityType,
     FinalStatus,
@@ -15,7 +18,7 @@ from entity_registry.core import (
 from entity_registry.aliases import (
     AliasManager,
     generate_aliases_from_stock_basic,
-    lookup_alias,
+    lookup_alias as _runtime_lookup_alias,
 )
 from entity_registry.contracts import (
     CANONICAL_ID_RULE_VERSION,
@@ -36,8 +39,8 @@ from entity_registry.batch import (
     BatchReferenceInput,
     BatchResolutionOutcome,
     BatchResolutionReport,
-    batch_resolve,
     batch_resolve_with_report,
+    batch_resolve_with_report as _runtime_batch_resolve_with_report,
 )
 from entity_registry.fuzzy import (
     FuzzyCandidate,
@@ -82,13 +85,12 @@ from entity_registry.ner import (
     NullNERExtractor,
 )
 from entity_registry.profile import (
-    CanonicalEntityProfile,
-    get_entity_profile,
+    get_entity_profile as _runtime_get_entity_profile,
 )
 from entity_registry.references import (
-    EntityReference,
-    ResolutionCase,
-    register_unresolved_reference,
+    EntityReference as _RuntimeEntityReference,
+    ResolutionCase as _RuntimeResolutionCase,
+    register_unresolved_reference as _runtime_register_unresolved_reference,
 )
 from entity_registry.review import (
     ManualReviewDecision,
@@ -105,12 +107,12 @@ from entity_registry.review import (
 )
 from entity_registry.resolution import (
     DeterministicMatcher,
-    resolve_mention,
+    resolve_mention_with_repositories as _runtime_resolve_mention_with_repositories,
 )
 from entity_registry.resolution_types import (
     BatchResolutionJob,
     MentionCandidateSet,
-    MentionResolutionResult,
+    MentionResolutionResult as _RuntimeMentionResolutionResult,
     ResolutionContext,
     ResolutionDecision,
 )
@@ -122,6 +124,202 @@ from entity_registry.storage import (
 )
 
 __version__ = "0.1.0"
+
+CanonicalEntity = ContractCanonicalEntity
+EntityAlias = ContractEntityAlias
+EntityReference = ContractEntityReference
+ResolutionCase = ContractResolutionCase
+
+
+def lookup_alias(alias_text: str) -> ContractCanonicalEntity | None:
+    """Return the contract canonical entity for one unambiguous alias hit."""
+
+    entity = _runtime_lookup_alias(alias_text)
+    if entity is None:
+        return None
+    return to_contract_canonical_entity(entity)
+
+
+def register_unresolved_reference(
+    reference: _RuntimeEntityReference | dict[str, object],
+) -> ContractResolutionCase:
+    """Register an unresolved reference and return a contract audit payload."""
+
+    unresolved_reference = _runtime_register_unresolved_reference(reference)
+    case = _RuntimeResolutionCase(
+        case_id=_new_public_case_id(),
+        reference_id=unresolved_reference.reference_id,
+        candidate_entity_ids=[],
+        selected_entity_id=None,
+        decision_type=DecisionType.AUTO,
+        decision_rationale="registered unresolved reference",
+        created_at=unresolved_reference.created_at,
+    )
+    _save_runtime_case_if_configured(case)
+    return to_contract_resolution_case(
+        case,
+        input_alias=unresolved_reference.raw_mention_text,
+        candidate_entities=[],
+        decision=EntityResolutionDecision.UNRESOLVED,
+        confidence=0.0,
+    )
+
+
+def resolve_mention(
+    raw_mention_text: str,
+    context: ResolutionContext | dict[str, object] | None = None,
+) -> ContractResolutionCase:
+    """Resolve one mention and return the contract resolution case."""
+
+    from entity_registry.init import (
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
+    )
+
+    repository_context = _get_default_repository_context()
+    if (
+        repository_context.reference_repo is None
+        or repository_context.case_repo is None
+    ):
+        raise RepositoryNotConfiguredError(
+            "resolution audit repositories are not configured; "
+            "call configure_default_repositories(..., reference_repo=..., "
+            "case_repo=...) before using public resolution APIs, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+
+    reference_id = _new_public_reference_id()
+    result = _runtime_resolve_mention_with_repositories(
+        raw_mention_text,
+        context,
+        entity_repo=repository_context.entity_repo,
+        alias_repo=repository_context.alias_repo,
+        reference_repo=repository_context.reference_repo,
+        case_repo=repository_context.case_repo,
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
+        reasoner_client=repository_context.reasoner_client,
+        existing_reference_id=reference_id,
+    )
+    return _contract_case_for_reference(
+        reference_id,
+        raw_mention_text,
+        result,
+        entity_repo=repository_context.entity_repo,
+        case_repo=repository_context.case_repo,
+    )
+
+
+def batch_resolve(
+    references: Sequence[_RuntimeEntityReference | dict[str, object] | str],
+) -> list[ContractResolutionCase]:
+    """Resolve a batch of mentions and return contract resolution cases."""
+
+    from entity_registry.init import _get_default_repository_context
+
+    report = _runtime_batch_resolve_with_report(references)
+    repository_context = _get_default_repository_context()
+    if repository_context.case_repo is None:
+        raise RuntimeError("resolution audit repository context disappeared")
+
+    return [
+        _contract_case_for_reference(
+            outcome.source_reference_id,
+            outcome.result.raw_mention_text,
+            outcome.result,
+            entity_repo=repository_context.entity_repo,
+            case_repo=repository_context.case_repo,
+        )
+        for outcome in report.outcomes
+        if outcome.source_reference_id is not None
+    ]
+
+
+def get_entity_profile(canonical_entity_id: str) -> dict[str, object]:
+    """Return a contract-shaped entity profile payload."""
+
+    profile = _runtime_get_entity_profile(canonical_entity_id)
+    return {
+        "canonical_entity": to_contract_canonical_entity(profile.canonical_entity),
+        "aliases": [
+            to_contract_entity_alias(alias)
+            for alias in profile.aliases
+        ],
+        "cross_listing_group": profile.cross_listing_group,
+        "cross_listing_entity_ids": list(profile.cross_listing_entity_ids),
+    }
+
+
+def _contract_case_for_reference(
+    reference_id: str | None,
+    raw_mention_text: str,
+    result: _RuntimeMentionResolutionResult,
+    *,
+    entity_repo: object,
+    case_repo: ResolutionCaseRepository,
+) -> ContractResolutionCase:
+    if reference_id is None:
+        raise RuntimeError("contract resolution payload requires a source reference ID")
+
+    case = _latest_case_for_reference(case_repo, reference_id)
+    candidate_entities = _candidate_entities_for_case(case, entity_repo)
+    return to_contract_resolution_case(
+        case,
+        input_alias=raw_mention_text,
+        candidate_entities=candidate_entities,
+        decision=_contract_decision_for(case, result),
+        confidence=result.resolution_confidence,
+    )
+
+
+def _latest_case_for_reference(
+    case_repo: ResolutionCaseRepository,
+    reference_id: str,
+) -> _RuntimeResolutionCase:
+    cases = case_repo.find_by_reference(reference_id)
+    if not cases:
+        raise RuntimeError(f"missing resolution case for reference {reference_id}")
+    return max(cases, key=lambda case: case.created_at)
+
+
+def _candidate_entities_for_case(
+    case: _RuntimeResolutionCase,
+    entity_repo: object,
+) -> list[object]:
+    entities = []
+    for entity_id in case.candidate_entity_ids:
+        entity = entity_repo.get(entity_id)
+        if entity is not None:
+            entities.append(entity)
+    return entities
+
+
+def _contract_decision_for(
+    case: _RuntimeResolutionCase,
+    result: _RuntimeMentionResolutionResult,
+) -> EntityResolutionDecision:
+    if result.resolved_entity_id is not None:
+        return EntityResolutionDecision.MATCHED
+    if case.candidate_entity_ids:
+        return EntityResolutionDecision.AMBIGUOUS
+    return EntityResolutionDecision.UNRESOLVED
+
+
+def _save_runtime_case_if_configured(case: _RuntimeResolutionCase) -> None:
+    from entity_registry.init import _get_default_repository_context
+
+    repository_context = _get_default_repository_context()
+    if repository_context.case_repo is not None:
+        repository_context.case_repo.save(case)
+
+
+def _new_public_reference_id() -> str:
+    return f"REF_{uuid4().hex}"
+
+
+def _new_public_case_id() -> str:
+    return f"CASE_{uuid4().hex}"
+
 
 __all__ = [
     "__version__",
@@ -135,7 +333,6 @@ __all__ = [
     "CallableReasonerRuntimeClient",
     "CANONICAL_ID_RULE_VERSION",
     "CanonicalEntity",
-    "CanonicalEntityProfile",
     "ContractBaseModel",
     "ContractCanonicalEntity",
     "ContractEntityAlias",
@@ -165,7 +362,6 @@ __all__ = [
     "LLMDisambiguationResponse",
     "ManualReviewDecision",
     "MentionCandidateSet",
-    "MentionResolutionResult",
     "NERExtractor",
     "NullFuzzyMatcher",
     "NullNERExtractor",

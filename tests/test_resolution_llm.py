@@ -399,8 +399,9 @@ def test_public_resolve_mention_uses_configured_reasoner_client(
     result = entity_registry.resolve_mention("宁德时代", {"market": "A-share"})
 
     references = list(reference_repo._references.values())
-    assert result.resolution_method is ResolutionMethod.LLM
-    assert result.resolved_entity_id == "ENT_STOCK_300750.SZ"
+    assert result.resolved_entity is not None
+    assert result.resolved_entity.entity_id == "ENT_STOCK_300750.SZ"
+    assert result.confidence == 0.86
     assert len(reasoner_client.calls) == 1
     assert case_repo.find_by_reference(references[0].reference_id)[0].decision_type is (
         DecisionType.LLM_ASSISTED
@@ -452,12 +453,10 @@ def test_public_resolve_mention_uses_configured_ner_fuzzy_and_reasoner(
 
     references = list(reference_repo._references.values())
     case = case_repo.find_by_reference(references[0].reference_id)[0]
-    assert result.model_dump(mode="json") == {
-        "raw_mention_text": "公告称宁德时代新能源获增持",
-        "resolved_entity_id": "ENT_STOCK_03750.HK",
-        "resolution_method": "llm",
-        "resolution_confidence": 0.89,
-    }
+    assert result.input_alias == "公告称宁德时代新能源获增持"
+    assert result.resolved_entity is not None
+    assert result.resolved_entity.entity_id == "ENT_STOCK_03750.HK"
+    assert result.confidence == 0.89
     assert ner_extractor.calls == ["公告称宁德时代新能源获增持"]
     assert fuzzy_matcher.calls == ["宁德时代新能源"]
     assert [candidate.canonical_entity_id for candidate in reasoner_client.calls[0].candidates] == [
@@ -530,8 +529,9 @@ def test_public_resolve_mention_uses_one_default_context_snapshot(
 
     references_a = list(reference_repo_a._references.values())
     assert read_count == 1
-    assert result.resolution_method is ResolutionMethod.LLM
-    assert result.resolved_entity_id == "ENT_STOCK_300750.SZ"
+    assert result.resolved_entity is not None
+    assert result.resolved_entity.entity_id == "ENT_STOCK_300750.SZ"
+    assert result.confidence == 0.86
     assert len(reasoner_a.calls) == 1
     assert reasoner_b.calls == []
     assert len(references_a) == 1

@@ -71,7 +71,7 @@ def test_batch_resolve_public_signature_and_exports() -> None:
         is inspect.Parameter.KEYWORD_ONLY
     )
     assert report_signature.parameters["reference_ids"].default is None
-    assert entity_registry.batch_resolve is batch_resolve
+    assert entity_registry.batch_resolve is not batch_resolve
     assert entity_registry.batch_resolve_with_report is batch_resolve_with_report
     assert entity_registry.BatchReferenceInput is BatchReferenceInput
     assert entity_registry.BatchCandidateGroup is BatchCandidateGroup
