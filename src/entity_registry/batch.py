@@ -283,6 +283,10 @@ def batch_resolve_with_report(
         [_coerce_reference_input(reference) for reference in references],
         reference_ids=reference_ids,
     )
+    _validate_existing_source_references(
+        normalized_inputs,
+        repository_context.reference_repo,
+    )
     job = _new_batch_job(normalized_inputs)
     report = run_batch_resolution_job(
         job,
@@ -373,6 +377,32 @@ def _validate_effective_reference_ids(inputs: Sequence[BatchReferenceInput]) -> 
             "duplicate source_reference_id in batch inputs: "
             f"{item.source_reference_id}"
         )
+
+
+def _validate_existing_source_references(
+    inputs: Sequence[BatchReferenceInput],
+    reference_repo: ReferenceRepository,
+) -> None:
+    for item in inputs:
+        if item.source_reference_id is None:
+            continue
+
+        existing_reference = reference_repo.get(item.source_reference_id)
+        if existing_reference is None:
+            continue
+
+        if (
+            existing_reference.resolved_entity_id is not None
+            or existing_reference.resolution_method is not ResolutionMethod.UNRESOLVED
+        ):
+            raise ValueError(
+                f"existing reference is already resolved: {item.source_reference_id}"
+            )
+        if existing_reference.raw_mention_text != item.raw_mention_text:
+            raise ValueError(
+                "existing reference raw_mention_text does not match supplied "
+                "raw_mention_text"
+            )
 
 
 def _enqueue_manual_review_items(

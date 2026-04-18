@@ -8,14 +8,18 @@ from typing import Any, Self
 
 from pydantic import model_validator
 from contracts.core import ContractBaseModel
-from contracts.schemas import (
-    CANONICAL_ID_RULE_VERSION,
-    CanonicalEntity,
-    EntityAlias,
-    EntityReference,
-    EntityResolutionDecision,
-    ResolutionCase as _ContractResolutionCase,
+import contracts.schemas as _contract_schemas
+
+CANONICAL_ID_RULE_VERSION = getattr(
+    _contract_schemas,
+    "CANONICAL_ID_RULE_VERSION",
+    "canonical-id-rule-v1",
 )
+CanonicalEntity = _contract_schemas.CanonicalEntity
+EntityAlias = _contract_schemas.EntityAlias
+EntityReference = _contract_schemas.EntityReference
+EntityResolutionDecision = _contract_schemas.EntityResolutionDecision
+_ContractResolutionCase = _contract_schemas.ResolutionCase
 
 
 class ResolutionCase(_ContractResolutionCase):

@@ -807,6 +807,79 @@ def test_batch_resolve_with_report_rejects_embedded_invalid_reference_ids_before
     assert review_repo.list_by_status("pending") == []
 
 
+@pytest.mark.parametrize(
+    (
+        "existing_reference_id",
+        "stored_mention",
+        "resolved_entity_id",
+        "supplied_mention",
+        "error_match",
+    ),
+    [
+        (
+            "ref-existing-mismatch",
+            "Stored Mention",
+            None,
+            "Different Mention",
+            "raw_mention_text",
+        ),
+        (
+            "ref-existing-resolved",
+            "Resolved Mention",
+            "ENT_STOCK_600519.SH",
+            "Resolved Mention",
+            "already resolved",
+        ),
+    ],
+)
+def test_batch_resolve_with_report_prevalidates_existing_reference_before_writes(
+    existing_reference_id: str,
+    stored_mention: str,
+    resolved_entity_id: str | None,
+    supplied_mention: str,
+    error_match: str,
+) -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    reference_repo.save(
+        make_reference(
+            existing_reference_id,
+            stored_mention,
+            resolved_entity_id=resolved_entity_id,
+        )
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        batch_resolve_with_report(
+            [
+                {
+                    "raw_mention_text": "Unlisted Before Mismatch",
+                    "source_context": {"offset": 1},
+                },
+                {
+                    "reference_id": existing_reference_id,
+                    "raw_mention_text": supplied_mention,
+                    "source_context": {"offset": 2},
+                },
+            ],
+            review_repo=review_repo,
+            reference_ids=["ref-before-mismatch", None],
+        )
+
+    assert set(reference_repo._references) == {existing_reference_id}
+    assert "ref-before-mismatch" not in reference_repo._references
+    assert case_repo._cases == {}
+    assert review_repo.list_by_status("pending") == []
+
+
 def test_manual_review_routing_keeps_a_h_shared_short_name_unresolved() -> None:
     entity_repo, alias_repo = initialized_repositories()
     case_repo = InMemoryResolutionCaseRepository()

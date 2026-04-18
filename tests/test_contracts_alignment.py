@@ -1,9 +1,11 @@
 import os
+import re
 import subprocess
 import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version as metadata_version
 from pathlib import Path
 
 import entity_registry
@@ -43,6 +45,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "stock_basic_sample.json"
 
 
+def _installed_contracts_package_version() -> str | None:
+    try:
+        return metadata_version("project-ult-contracts")
+    except PackageNotFoundError:
+        return None
+
+
+def _has_required_installed_contracts_package() -> bool:
+    installed_version = _installed_contracts_package_version()
+    if installed_version is None:
+        return False
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", installed_version)
+    if match is None:
+        return False
+    return tuple(int(part) for part in match.groups()) >= (0, 1, 1)
+
+
 @pytest.fixture(autouse=True)
 def reset_public_repositories() -> Iterator[None]:
     entity_registry.reset_default_repositories()
@@ -53,6 +72,9 @@ def reset_public_repositories() -> Iterator[None]:
 def test_installed_contracts_dependency_exports_canonical_id_rule_version(
     tmp_path: Path,
 ) -> None:
+    if not _has_required_installed_contracts_package():
+        pytest.skip("project-ult-contracts>=0.1.1 is not installed in this sandbox")
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["ENTITY_REGISTRY_CONTRACTS_SRC"] = str(
@@ -134,6 +156,9 @@ def test_entity_registry_reexports_contract_entity_schemas() -> None:
 def test_resolution_case_wrapper_does_not_patch_upstream_contract_schema(
     tmp_path: Path,
 ) -> None:
+    if not _has_required_installed_contracts_package():
+        pytest.skip("project-ult-contracts>=0.1.1 is not installed in this sandbox")
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     script = """
