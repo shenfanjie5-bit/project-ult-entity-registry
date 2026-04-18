@@ -8,6 +8,7 @@ from typing import Any
 
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
+    CANONICAL_ID_RULE_VERSION,
     CanonicalEntity,
     EntityAlias,
     EntityReference,
@@ -15,17 +16,11 @@ from contracts.schemas import (
     ResolutionCase,
 )
 
-try:
-    from contracts.schemas import CANONICAL_ID_RULE_VERSION as _CONTRACT_RULE_VERSION
-except ImportError:
-    _CONTRACT_RULE_VERSION = "1"
-
 
 ContractCanonicalEntity = CanonicalEntity
 ContractEntityAlias = EntityAlias
 ContractEntityReference = EntityReference
 ContractResolutionCase = ResolutionCase
-CANONICAL_ID_RULE_VERSION = _CONTRACT_RULE_VERSION
 _NO_CANDIDATE_ENTITY_ID = "ENT_UNRESOLVED_NO_CANDIDATE"
 _NO_CANDIDATE_ENTITY_TYPE = "unresolved"
 
