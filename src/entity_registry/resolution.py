@@ -59,6 +59,16 @@ class ResolutionAuditRepository(Protocol):
     ) -> None: ...
 
 
+class NewResolutionAuditRepository(ResolutionAuditRepository, Protocol):
+    """Audit repository that can atomically create a new reference."""
+
+    def save_new_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None: ...
+
+
 class ResolutionAuditRepositoryRequiredError(RuntimeError):
     """Raised when resolution is asked to write audit records without a UoW."""
 
@@ -92,6 +102,25 @@ class _RepositoryResolutionAuditRepository:
         raise ResolutionAuditRepositoryRequiredError(
             "resolution audit writes require a native save_resolution(reference, case) "
             "unit of work; separate reference/case writes are not supported",
+        )
+
+    def save_new_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        native_save_new_resolution = getattr(
+            self._reference_repo,
+            "save_new_resolution",
+            None,
+        )
+        if callable(native_save_new_resolution):
+            native_save_new_resolution(reference, case)
+            return
+
+        raise ResolutionAuditRepositoryRequiredError(
+            "new resolution audit writes require a native "
+            "save_new_resolution(reference, case) unit of work",
         )
 
 
@@ -415,7 +444,6 @@ def resolve_mention_with_repositories(
         raw_mention_text,
         reference_repo,
     )
-    _validate_new_reference_id(new_reference_id, reference_repo)
 
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates_with_fuzzy(
@@ -470,6 +498,7 @@ def resolve_mention_with_repositories(
         audit_repo=audit_repo,
         reference_repo=reference_repo,
         case_repo=case_repo,
+        require_new_reference=new_reference_id is not None,
     )
     return MentionResolutionResult(
         raw_mention_text=raw_mention_text,
@@ -743,6 +772,7 @@ def _save_resolution_audit(
     audit_repo: ResolutionAuditRepository | None,
     reference_repo: ReferenceRepository | None,
     case_repo: ResolutionCaseRepository | None,
+    require_new_reference: bool = False,
 ) -> None:
     if audit_repo is None:
         if reference_repo is None or case_repo is None:
@@ -751,6 +781,15 @@ def _save_resolution_audit(
             )
         _validate_resolution_audit_repository_cohesion(reference_repo, case_repo)
         audit_repo = _RepositoryResolutionAuditRepository(reference_repo, case_repo)
+    if require_new_reference:
+        save_new_resolution = getattr(audit_repo, "save_new_resolution", None)
+        if not callable(save_new_resolution):
+            raise ResolutionAuditRepositoryRequiredError(
+                "new resolution audit writes require a native "
+                "save_new_resolution(reference, case) unit of work",
+            )
+        save_new_resolution(reference, case)
+        return
     audit_repo.save_resolution(reference, case)
 
 
@@ -780,16 +819,6 @@ def _existing_reference_for_update(
             "raw_mention_text",
         )
     return existing_reference
-
-
-def _validate_new_reference_id(
-    new_reference_id: str | None,
-    reference_repo: ReferenceRepository | None,
-) -> None:
-    if new_reference_id is None or reference_repo is None:
-        return
-    if reference_repo.get(new_reference_id) is not None:
-        raise ValueError(f"new_reference_id already exists: {new_reference_id}")
 
 
 def _validate_resolution_audit_repository_cohesion(
@@ -908,6 +937,7 @@ __all__ = [
     "DeterministicMatcher",
     "ResolutionAuditRepository",
     "ResolutionAuditRepositoryRequiredError",
+    "NewResolutionAuditRepository",
     "resolve_mention",
     "resolve_mention_with_repositories",
 ]

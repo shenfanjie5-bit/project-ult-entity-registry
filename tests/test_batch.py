@@ -1083,6 +1083,13 @@ class FailingAuditReferenceRepository(InMemoryResolutionAuditReferenceRepository
     ) -> None:
         raise RuntimeError("audit failed")
 
+    def save_new_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        raise RuntimeError("audit failed")
+
 
 class FailingAfterSaveCountReviewRepository(InMemoryReviewRepository):
     def __init__(self, *, fail_after: int | None) -> None:

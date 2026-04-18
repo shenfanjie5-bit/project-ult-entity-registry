@@ -249,30 +249,49 @@ class InMemoryResolutionAuditReferenceRepository(InMemoryReferenceRepository):
         case: ResolutionCase,
     ) -> None:
         with self._lock:
-            if case.reference_id != reference.reference_id:
+            self._save_resolution_unchecked(reference, case)
+
+    def save_new_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        with self._lock:
+            if reference.reference_id in self._references:
                 raise ValueError(
-                    "resolution case reference_id must match EntityReference",
+                    f"new_reference_id already exists: {reference.reference_id}",
                 )
-            self._case_repo._validate_save(case)
-            reference_existed = reference.reference_id in self._references
-            previous_reference = self._references.get(reference.reference_id)
-            case_existed = case.case_id in self._case_repo._cases
-            previous_case = self._case_repo._cases.get(case.case_id)
+            self._save_resolution_unchecked(reference, case)
 
-            try:
-                self._save_unchecked(reference)
-                self._case_repo._save_unchecked(case)
-            except Exception:
-                if reference_existed and previous_reference is not None:
-                    self._references[reference.reference_id] = previous_reference
-                else:
-                    self._references.pop(reference.reference_id, None)
+    def _save_resolution_unchecked(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None:
+        if case.reference_id != reference.reference_id:
+            raise ValueError(
+                "resolution case reference_id must match EntityReference",
+            )
+        self._case_repo._validate_save(case)
+        reference_existed = reference.reference_id in self._references
+        previous_reference = self._references.get(reference.reference_id)
+        case_existed = case.case_id in self._case_repo._cases
+        previous_case = self._case_repo._cases.get(case.case_id)
 
-                if case_existed and previous_case is not None:
-                    self._case_repo._cases[case.case_id] = previous_case
-                else:
-                    self._case_repo._cases.pop(case.case_id, None)
-                raise
+        try:
+            self._save_unchecked(reference)
+            self._case_repo._save_unchecked(case)
+        except Exception:
+            if reference_existed and previous_reference is not None:
+                self._references[reference.reference_id] = previous_reference
+            else:
+                self._references.pop(reference.reference_id, None)
+
+            if case_existed and previous_case is not None:
+                self._case_repo._cases[case.case_id] = previous_case
+            else:
+                self._case_repo._cases.pop(case.case_id, None)
+            raise
 
 
 class InMemoryResolutionCaseRepository:

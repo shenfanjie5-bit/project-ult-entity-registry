@@ -1,4 +1,5 @@
 import inspect
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -297,6 +298,53 @@ def test_existing_reference_id_rejects_raw_mention_mismatch_before_overwrite() -
     assert case_repo.find_by_reference("ref-mismatch") == []
 
 
+def test_concurrent_new_reference_id_conflict_writes_one_audit_case() -> None:
+    entity_repo, alias_repo, _reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+    reference_repo = BlockingNewResolutionAuditReferenceRepository(case_repo, parties=2)
+    results: list[MentionResolutionResult] = []
+    errors: list[BaseException] = []
+
+    def resolve(raw_mention_text: str) -> None:
+        try:
+            results.append(
+                resolve_mention_with_repositories(
+                    raw_mention_text,
+                    None,
+                    entity_repo=entity_repo,
+                    alias_repo=alias_repo,
+                    reference_repo=reference_repo,
+                    case_repo=case_repo,
+                    new_reference_id="ref-concurrent",
+                ),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=resolve, args=("不存在的公司 A",)),
+        threading.Thread(target=resolve, args=("不存在的公司 B",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "new_reference_id already exists" in str(errors[0])
+
+    reference = reference_repo.get("ref-concurrent")
+    cases = case_repo.find_by_reference("ref-concurrent")
+    assert reference is not None
+    assert reference.raw_mention_text in {"不存在的公司 A", "不存在的公司 B"}
+    assert len(cases) == 1
+    assert cases[0].reference_id == "ref-concurrent"
+
+
 def test_a_h_shared_short_name_returns_unresolved_with_candidate_case() -> None:
     entity_repo, alias_repo, reference_repo, case_repo = (
         initialized_resolution_repositories()
@@ -514,3 +562,43 @@ class NativeResolutionAuditReferenceRepository(InMemoryReferenceRepository):
         if self.case_repo is not None:
             self.case_repo.save(case)
         self.saved_cases.append(case)
+
+    def save_new_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        with self._lock:
+            if reference.reference_id in self._references:
+                raise ValueError(
+                    f"new_reference_id already exists: {reference.reference_id}",
+                )
+            self._save_unchecked(reference)
+            try:
+                if self.case_repo is not None:
+                    self.case_repo.save(case)
+                self.saved_cases.append(case)
+            except Exception:
+                self._references.pop(reference.reference_id, None)
+                raise
+
+
+class BlockingNewResolutionAuditReferenceRepository(
+    NativeResolutionAuditReferenceRepository,
+):
+    def __init__(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+        *,
+        parties: int,
+    ) -> None:
+        super().__init__(case_repo)
+        self._barrier = threading.Barrier(parties)
+
+    def save_new_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self._barrier.wait(timeout=2)
+        super().save_new_resolution(reference, case)

@@ -555,3 +555,11 @@ class ReconfiguringAuditReferenceRepository(InMemoryResolutionAuditReferenceRepo
     ) -> None:
         super().save_resolution(reference, case)
         self._callback()
+
+    def save_new_resolution(
+        self,
+        reference: RuntimeEntityReference,
+        case: RuntimeResolutionCase,
+    ) -> None:
+        super().save_new_resolution(reference, case)
+        self._callback()

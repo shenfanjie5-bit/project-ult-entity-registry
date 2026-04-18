@@ -323,6 +323,21 @@ def test_in_memory_resolution_audit_reference_repository_saves_reference_and_cas
     assert case_repo.get("case-1") == case
 
 
+def test_in_memory_resolution_audit_reference_repository_rejects_new_reference_conflict() -> None:
+    case_repo = InMemoryResolutionCaseRepository()
+    repository = InMemoryResolutionAuditReferenceRepository(case_repo)
+    existing_reference = make_reference("ref-1", None)
+    new_reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+    case = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+    repository.save(existing_reference)
+
+    with pytest.raises(ValueError, match="new_reference_id already exists"):
+        repository.save_new_resolution(new_reference, case)
+
+    assert repository.get("ref-1") == existing_reference
+    assert case_repo.find_by_reference("ref-1") == []
+
+
 def test_in_memory_resolution_audit_repository_stages_case_before_reference() -> None:
     case_repo = FailingResolutionCaseRepository()
     repository = InMemoryResolutionAuditReferenceRepository(case_repo)
