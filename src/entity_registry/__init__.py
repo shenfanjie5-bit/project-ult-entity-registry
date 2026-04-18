@@ -90,7 +90,7 @@ from entity_registry.profile import (
 from entity_registry.references import (
     EntityReference as _RuntimeEntityReference,
     ResolutionCase as _RuntimeResolutionCase,
-    register_unresolved_reference as _runtime_register_unresolved_reference,
+    _coerce_unresolved_reference,
 )
 from entity_registry.review import (
     ManualReviewDecision,
@@ -107,6 +107,7 @@ from entity_registry.review import (
 )
 from entity_registry.resolution import (
     DeterministicMatcher,
+    ResolutionAuditRepositoryRequiredError,
     resolve_mention_with_repositories as _runtime_resolve_mention_with_repositories,
 )
 from entity_registry.resolution_types import (
@@ -119,6 +120,7 @@ from entity_registry.resolution_types import (
 from entity_registry.storage import (
     InMemoryReviewRepository,
     InMemoryResolutionCaseRepository,
+    ReferenceRepository,
     ReviewRepository,
     ResolutionCaseRepository,
 )
@@ -145,7 +147,28 @@ def register_unresolved_reference(
 ) -> ContractResolutionCase:
     """Register an unresolved reference and return a contract audit payload."""
 
-    unresolved_reference = _runtime_register_unresolved_reference(reference)
+    from entity_registry.init import (
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
+    )
+
+    repository_context = _get_default_repository_context()
+    if repository_context.reference_repo is None:
+        raise RepositoryNotConfiguredError(
+            "reference audit repository is not configured; "
+            "call configure_default_repositories(..., reference_repo=...) before "
+            "registering unresolved references, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+    if repository_context.case_repo is None:
+        raise RepositoryNotConfiguredError(
+            "resolution case audit repository is not configured; "
+            "call configure_default_repositories(..., case_repo=...) before "
+            "registering unresolved references, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+
+    unresolved_reference = _coerce_unresolved_reference(reference)
     case = _RuntimeResolutionCase(
         case_id=_new_public_case_id(),
         reference_id=unresolved_reference.reference_id,
@@ -155,9 +178,14 @@ def register_unresolved_reference(
         decision_rationale="registered unresolved reference",
         created_at=unresolved_reference.created_at,
     )
-    _save_runtime_case_if_configured(case)
-    return to_contract_resolution_case(
+    persisted_case = _save_public_resolution_audit(
+        unresolved_reference,
         case,
+        reference_repo=repository_context.reference_repo,
+        case_repo=repository_context.case_repo,
+    )
+    return to_contract_resolution_case(
+        persisted_case,
         input_alias=unresolved_reference.raw_mention_text,
         candidate_entities=[],
         decision=EntityResolutionDecision.UNRESOLVED,
@@ -305,12 +333,54 @@ def _contract_decision_for(
     return EntityResolutionDecision.UNRESOLVED
 
 
-def _save_runtime_case_if_configured(case: _RuntimeResolutionCase) -> None:
-    from entity_registry.init import _get_default_repository_context
+def _save_public_resolution_audit(
+    reference: _RuntimeEntityReference,
+    case: _RuntimeResolutionCase,
+    *,
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+) -> _RuntimeResolutionCase:
+    save_resolution = getattr(reference_repo, "save_resolution", None)
+    if not callable(save_resolution):
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit writes require a native save_resolution(reference, case) "
+            "unit of work; separate reference/case writes are not supported",
+        )
 
-    repository_context = _get_default_repository_context()
-    if repository_context.case_repo is not None:
-        repository_context.case_repo.save(case)
+    previous_reference = reference_repo.get(reference.reference_id)
+    try:
+        save_resolution(reference, case)
+    except Exception:
+        _restore_reference_after_audit_failure(
+            reference_repo,
+            reference.reference_id,
+            previous_reference,
+        )
+        raise
+
+    persisted_case = case_repo.get(case.case_id)
+    if persisted_case is None:
+        _restore_reference_after_audit_failure(
+            reference_repo,
+            reference.reference_id,
+            previous_reference,
+        )
+        raise RuntimeError(
+            "resolution audit repository did not persist the unresolved "
+            f"resolution case {case.case_id}",
+        )
+    return persisted_case
+
+
+def _restore_reference_after_audit_failure(
+    reference_repo: ReferenceRepository,
+    reference_id: str,
+    previous_reference: _RuntimeEntityReference | None,
+) -> None:
+    if previous_reference is None:
+        reference_repo.delete(reference_id)
+        return
+    reference_repo.save(previous_reference)
 
 
 def _new_public_reference_id() -> str:

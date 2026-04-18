@@ -23,6 +23,7 @@ from entity_registry.storage import (
     InMemoryAliasRepository,
     InMemoryEntityRepository,
     InMemoryReferenceRepository,
+    InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
 )
 
@@ -161,11 +162,13 @@ def test_register_unresolved_reference_into_rejects_conflicting_payload(
 
 
 def test_public_register_unresolved_reference_uses_configured_repository() -> None:
-    reference_repo = InMemoryReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
     entity_registry.configure_default_repositories(
         InMemoryEntityRepository(),
         InMemoryAliasRepository(),
         reference_repo=reference_repo,
+        case_repo=case_repo,
     )
 
     contract_case = entity_registry.register_unresolved_reference(
@@ -177,10 +180,59 @@ def test_public_register_unresolved_reference_uses_configured_repository() -> No
     )
 
     reference = reference_repo.get("ref-public")
+    cases = case_repo.find_by_reference("ref-public")
     assert reference is not None
+    assert len(cases) == 1
     assert reference.resolution_method is ResolutionMethod.UNRESOLVED
+    assert contract_case.resolution_case_id == cases[0].case_id
     assert contract_case.decision is entity_registry.EntityResolutionDecision.UNRESOLVED
     assert contract_case.evidence_refs == ["ref-public"]
+
+
+def test_public_register_unresolved_reference_rejects_non_atomic_audit_repository() -> None:
+    reference_repo = InMemoryReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(RuntimeError, match="save_resolution"):
+        entity_registry.register_unresolved_reference(
+            {
+                "reference_id": "ref-non-atomic",
+                "raw_mention_text": "Unknown Corp",
+                "source_context": {"source": "fixture"},
+            }
+        )
+
+    assert reference_repo.get("ref-non-atomic") is None
+    assert case_repo.find_by_reference("ref-non-atomic") == []
+
+
+def test_public_register_unresolved_reference_rolls_back_case_write_failure() -> None:
+    case_repo = FailingCaseWriteRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    entity_registry.configure_default_repositories(
+        InMemoryEntityRepository(),
+        InMemoryAliasRepository(),
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(RuntimeError, match="case write failed"):
+        entity_registry.register_unresolved_reference(
+            {
+                "reference_id": "ref-case-failure",
+                "raw_mention_text": "Unknown Corp",
+                "source_context": {"source": "fixture"},
+            }
+        )
+
+    assert reference_repo.get("ref-case-failure") is None
+    assert case_repo.find_by_reference("ref-case-failure") == []
 
 
 def test_register_unresolved_reference_into_rejects_resolved_model() -> None:
@@ -324,3 +376,8 @@ def test_batch_resolution_job_round_trips() -> None:
     restored = BatchResolutionJob.model_validate(job.model_dump(mode="json"))
 
     assert restored == job
+
+
+class FailingCaseWriteRepository(InMemoryResolutionCaseRepository):
+    def _save_unchecked(self, case: ResolutionCase) -> None:
+        raise RuntimeError("case write failed")
