@@ -71,6 +71,7 @@ class _RepositoryResolutionAuditRepository:
         reference_repo: ReferenceRepository,
         case_repo: ResolutionCaseRepository,
     ) -> None:
+        _validate_resolution_audit_repository_cohesion(reference_repo, case_repo)
         self._reference_repo = reference_repo
         self._case_repo = case_repo
 
@@ -377,8 +378,8 @@ def resolve_mention(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
-        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
-        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
     )
 
@@ -396,11 +397,25 @@ def resolve_mention_with_repositories(
     ner_extractor: NERExtractor | None = None,
     reasoner_client: ReasonerRuntimeClient | None = None,
     existing_reference_id: str | None = None,
+    new_reference_id: str | None = None,
 ) -> MentionResolutionResult:
     """Resolve one mention using explicit repositories and write audit records."""
 
     if existing_reference_id is not None and not existing_reference_id.strip():
         raise ValueError("existing_reference_id must be a non-empty string")
+    if new_reference_id is not None and not new_reference_id.strip():
+        raise ValueError("new_reference_id must be a non-empty string")
+    if existing_reference_id is not None and new_reference_id is not None:
+        raise ValueError(
+            "existing_reference_id and new_reference_id are mutually exclusive",
+        )
+
+    existing_reference = _existing_reference_for_update(
+        existing_reference_id,
+        raw_mention_text,
+        reference_repo,
+    )
+    _validate_new_reference_id(new_reference_id, reference_repo)
 
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates_with_fuzzy(
@@ -427,13 +442,10 @@ def resolve_mention_with_repositories(
     resolution_confidence = decision.confidence if resolved_entity_id is not None else None
     candidate_entity_ids = _candidate_entity_ids(candidate_set)
 
-    existing_reference = (
-        reference_repo.get(existing_reference_id)
-        if existing_reference_id is not None and reference_repo is not None
-        else None
-    )
     reference_payload = {
-        "reference_id": existing_reference_id or _new_reference_id(),
+        "reference_id": (
+            existing_reference_id or new_reference_id or _new_reference_id()
+        ),
         "raw_mention_text": raw_mention_text,
         "source_context": source_context,
         "resolved_entity_id": resolved_entity_id,
@@ -737,8 +749,66 @@ def _save_resolution_audit(
             raise ResolutionAuditRepositoryRequiredError(
                 "resolution audit writes require audit_repo or reference_repo/case_repo"
             )
+        _validate_resolution_audit_repository_cohesion(reference_repo, case_repo)
         audit_repo = _RepositoryResolutionAuditRepository(reference_repo, case_repo)
     audit_repo.save_resolution(reference, case)
+
+
+def _existing_reference_for_update(
+    existing_reference_id: str | None,
+    raw_mention_text: str,
+    reference_repo: ReferenceRepository | None,
+) -> EntityReference | None:
+    if existing_reference_id is None:
+        return None
+    if reference_repo is None:
+        raise ValueError("existing_reference_id requires reference_repo")
+
+    existing_reference = reference_repo.get(existing_reference_id)
+    if existing_reference is None:
+        raise ValueError(f"existing_reference_id not found: {existing_reference_id}")
+    if (
+        existing_reference.resolved_entity_id is not None
+        or existing_reference.resolution_method is not ResolutionMethod.UNRESOLVED
+    ):
+        raise ValueError(
+            "existing_reference_id must refer to an unresolved reference",
+        )
+    if existing_reference.raw_mention_text != raw_mention_text:
+        raise ValueError(
+            "existing_reference_id raw_mention_text does not match the supplied "
+            "raw_mention_text",
+        )
+    return existing_reference
+
+
+def _validate_new_reference_id(
+    new_reference_id: str | None,
+    reference_repo: ReferenceRepository | None,
+) -> None:
+    if new_reference_id is None or reference_repo is None:
+        return
+    if reference_repo.get(new_reference_id) is not None:
+        raise ValueError(f"new_reference_id already exists: {new_reference_id}")
+
+
+def _validate_resolution_audit_repository_cohesion(
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+) -> None:
+    bound_case_repo = _bound_case_repository(reference_repo)
+    if bound_case_repo is not None and bound_case_repo is not case_repo:
+        raise ResolutionAuditRepositoryRequiredError(
+            "reference_repo.save_resolution is bound to a different case repository",
+        )
+
+
+def _bound_case_repository(reference_repo: ReferenceRepository) -> object | None:
+    for attribute in ("_case_repo", "case_repo"):
+        value = getattr(reference_repo, attribute, None)
+        if value is not None:
+            return value
+    return None
 
 
 def _generate_fuzzy_candidates(

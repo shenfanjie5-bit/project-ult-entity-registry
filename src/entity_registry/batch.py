@@ -202,6 +202,7 @@ def run_batch_resolution_job(
 
     active_resolver = resolver if resolver is not None else _resolve_mention_for_batch
     inputs = [_coerce_reference_input(reference) for reference in references]
+    _validate_effective_reference_ids(inputs)
     job.reference_ids = _unique_ids([
         item.source_reference_id
         for item in inputs
@@ -526,6 +527,10 @@ def _resolve_mention_for_batch(
         return resolve_mention(raw_mention_text, context)
 
     repository_context = _get_default_resolution_repository_context()
+    reference_id_kwargs = _reference_id_kwargs_for_resolution(
+        existing_reference_id,
+        repository_context.reference_repo,
+    )
     return resolve_mention_with_repositories(
         raw_mention_text,
         context,
@@ -533,11 +538,22 @@ def _resolve_mention_for_batch(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
-        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
-        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
-        existing_reference_id=existing_reference_id,
+        **reference_id_kwargs,
     )
+
+
+def _reference_id_kwargs_for_resolution(
+    reference_id: str | None,
+    reference_repo: ReferenceRepository,
+) -> dict[str, str]:
+    if reference_id is None:
+        return {}
+    if reference_repo.get(reference_id) is None:
+        return {"new_reference_id": reference_id}
+    return {"existing_reference_id": reference_id}
 
 
 def _resolver_accepts_existing_reference_id(resolver: Resolver) -> bool:

@@ -219,6 +219,84 @@ def test_missing_mention_returns_unresolved_and_writes_audit_records() -> None:
     assert cases[0].selected_entity_id is None
 
 
+def test_existing_reference_id_rejects_missing_reference_before_write() -> None:
+    entity_repo, alias_repo, reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+
+    with pytest.raises(ValueError, match="existing_reference_id not found"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-missing",
+        )
+
+    assert reference_repo.get("ref-missing") is None
+    assert case_repo.find_by_reference("ref-missing") == []
+
+
+def test_existing_reference_id_rejects_resolved_reference_before_overwrite() -> None:
+    entity_repo, alias_repo, reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+    existing_reference = EntityReference(
+        reference_id="ref-resolved",
+        raw_mention_text="贵州茅台",
+        source_context={"document_id": "doc-original"},
+        resolved_entity_id="ENT_STOCK_600519.SH",
+        resolution_method=ResolutionMethod.DETERMINISTIC,
+        resolution_confidence=1.0,
+    )
+    reference_repo.save(existing_reference)
+
+    with pytest.raises(ValueError, match="unresolved reference"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            {"document_id": "doc-new"},
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-resolved",
+        )
+
+    assert reference_repo.get("ref-resolved") == existing_reference
+    assert case_repo.find_by_reference("ref-resolved") == []
+
+
+def test_existing_reference_id_rejects_raw_mention_mismatch_before_overwrite() -> None:
+    entity_repo, alias_repo, reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+    existing_reference = EntityReference(
+        reference_id="ref-mismatch",
+        raw_mention_text="原始公司",
+        source_context={"document_id": "doc-original"},
+        resolved_entity_id=None,
+        resolution_method=ResolutionMethod.UNRESOLVED,
+        resolution_confidence=None,
+    )
+    reference_repo.save(existing_reference)
+
+    with pytest.raises(ValueError, match="raw_mention_text"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            {"document_id": "doc-new"},
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-mismatch",
+        )
+
+    assert reference_repo.get("ref-mismatch") == existing_reference
+    assert case_repo.find_by_reference("ref-mismatch") == []
+
+
 def test_a_h_shared_short_name_returns_unresolved_with_candidate_case() -> None:
     entity_repo, alias_repo, reference_repo, case_repo = (
         initialized_resolution_repositories()

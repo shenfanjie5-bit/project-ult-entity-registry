@@ -108,6 +108,7 @@ from entity_registry.review import (
 from entity_registry.resolution import (
     DeterministicMatcher,
     ResolutionAuditRepositoryRequiredError,
+    _validate_resolution_audit_repository_cohesion,
     resolve_mention_with_repositories as _runtime_resolve_mention_with_repositories,
 )
 from entity_registry.resolution_types import (
@@ -227,7 +228,7 @@ def resolve_mention(
         fuzzy_matcher=repository_context.fuzzy_matcher,
         ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
-        existing_reference_id=reference_id,
+        new_reference_id=reference_id,
     )
     return _contract_case_for_reference(
         reference_id,
@@ -268,6 +269,10 @@ def batch_resolve(
         *,
         existing_reference_id: str | None = None,
     ) -> _RuntimeMentionResolutionResult:
+        reference_id_kwargs = _reference_id_kwargs_for_public_resolution(
+            existing_reference_id,
+            repository_context.reference_repo,
+        )
         return _runtime_resolve_mention_with_repositories(
             raw_mention_text,
             context,
@@ -278,7 +283,7 @@ def batch_resolve(
             fuzzy_matcher=repository_context.fuzzy_matcher,
             ner_extractor=repository_context.ner_extractor,
             reasoner_client=repository_context.reasoner_client,
-            existing_reference_id=existing_reference_id,
+            **reference_id_kwargs,
         )
 
     report = _runtime_run_batch_resolution_job(
@@ -375,6 +380,17 @@ def _coerce_public_batch_reference_input(
     raise TypeError("batch references must be EntityReference, dict, or str")
 
 
+def _reference_id_kwargs_for_public_resolution(
+    reference_id: str | None,
+    reference_repo: ReferenceRepository,
+) -> dict[str, str]:
+    if reference_id is None:
+        return {}
+    if reference_repo.get(reference_id) is None:
+        return {"new_reference_id": reference_id}
+    return {"existing_reference_id": reference_id}
+
+
 def _required_public_batch_text(
     payload: dict[str, object],
     field_name: str,
@@ -468,6 +484,7 @@ def _save_public_resolution_audit(
             "resolution audit writes require a native save_resolution(reference, case) "
             "unit of work; separate reference/case writes are not supported",
         )
+    _validate_resolution_audit_repository_cohesion(reference_repo, case_repo)
 
     previous_reference = reference_repo.get(reference.reference_id)
     try:

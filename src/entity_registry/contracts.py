@@ -6,8 +6,6 @@ import hashlib
 from collections.abc import Sequence
 from typing import Any, Self
 
-import contracts.schemas as _contract_schemas
-import contracts.schemas.entities as _contract_entity_schemas
 from pydantic import model_validator
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
@@ -21,7 +19,7 @@ from contracts.schemas import (
 
 
 class ResolutionCase(_ContractResolutionCase):
-    """Contract resolution case with explicit no-candidate unresolved support."""
+    """Entity-registry boundary case with explicit no-candidate unresolved support."""
 
     candidate_entities: list[EntityReference]
 
@@ -32,15 +30,11 @@ class ResolutionCase(_ContractResolutionCase):
             and not self.candidate_entities
         ):
             raise ValueError(
-                "contracts ResolutionCase requires candidate_entities unless "
+                "entity-registry ResolutionCase requires candidate_entities unless "
                 "decision='unresolved'"
             )
         return self
 
-
-# Keep contract module imports aligned with the relaxed local boundary schema.
-_contract_schemas.ResolutionCase = ResolutionCase
-_contract_entity_schemas.ResolutionCase = ResolutionCase
 
 ContractCanonicalEntity = CanonicalEntity
 ContractEntityAlias = EntityAlias
