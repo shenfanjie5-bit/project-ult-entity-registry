@@ -344,6 +344,121 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
     assert reference_repo.saved_cases[0].reference_id == references[0].reference_id
 
 
+def test_existing_reference_id_must_exist_before_resolution_write() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo)
+
+    with pytest.raises(ValueError, match="existing reference not found"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-missing",
+        )
+
+    assert saved_references(reference_repo) == []
+    assert case_repo.find_by_reference("ref-missing") == []
+
+
+def test_existing_reference_id_must_be_unresolved() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo)
+    reference_repo.save(
+        EntityReference(
+            reference_id="ref-resolved",
+            raw_mention_text="贵州茅台",
+            source_context={},
+            resolved_entity_id="ENT_STOCK_600519.SH",
+            resolution_method=ResolutionMethod.DETERMINISTIC,
+            resolution_confidence=1.0,
+        )
+    )
+
+    with pytest.raises(ValueError, match="already resolved"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-resolved",
+        )
+
+    assert case_repo.find_by_reference("ref-resolved") == []
+
+
+def test_existing_reference_id_must_match_raw_mention_text() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo)
+    reference_repo.save(
+        EntityReference(
+            reference_id="ref-other-mention",
+            raw_mention_text="平安银行",
+            source_context={},
+            resolved_entity_id=None,
+            resolution_method=ResolutionMethod.UNRESOLVED,
+            resolution_confidence=None,
+        )
+    )
+
+    with pytest.raises(ValueError, match="raw_mention_text"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-other-mention",
+        )
+
+    assert case_repo.find_by_reference("ref-other-mention") == []
+
+
+def test_new_reference_id_rejects_existing_reference_before_write() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo)
+    reference_repo.save(
+        EntityReference(
+            reference_id="ref-collision",
+            raw_mention_text="贵州茅台",
+            source_context={},
+            resolved_entity_id=None,
+            resolution_method=ResolutionMethod.UNRESOLVED,
+            resolution_confidence=None,
+        )
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            new_reference_id="ref-collision",
+        )
+
+    assert case_repo.find_by_reference("ref-collision") == []
+
+
 def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
     text = Path("src/entity_registry/resolution.py").read_text(encoding="utf-8")
 

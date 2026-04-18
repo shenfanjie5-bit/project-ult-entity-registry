@@ -72,13 +72,30 @@ class ResolutionCaseRepository(Protocol):
     def find_by_reference(self, reference_id: str) -> list[ResolutionCase]: ...
 
 
-class ReviewRepository(Protocol):
-    """Storage contract for manual review queue items.
+class ReviewDecisionUnitOfWork(Protocol):
+    """Persistence-owned transaction contract for manual review decisions.
 
     ``complete_decision`` must validate and complete a queue item atomically
     with the supplied audit and alias repositories. If any write fails, the
     implementation must roll back earlier writes before re-raising.
     """
+
+    def complete_decision(
+        self,
+        queue_item_id: str,
+        terminal_status: str,
+        build_records: Callable[
+            [UnresolvedQueueItem],
+            tuple[EntityReference, ResolutionCase, EntityAlias | None],
+        ],
+        *,
+        audit_writer: ReviewAuditWriter,
+        alias_repo: AliasRepository,
+    ) -> tuple[UnresolvedQueueItem, EntityReference, ResolutionCase]: ...
+
+
+class ReviewRepository(ReviewDecisionUnitOfWork, Protocol):
+    """Storage contract for manual review queue items."""
 
     def save(self, item: UnresolvedQueueItem) -> None: ...
 
@@ -94,19 +111,6 @@ class ReviewRepository(Protocol):
     ) -> list[UnresolvedQueueItem]: ...
 
     def claim(self, queue_item_id: str, reviewer_id: str) -> UnresolvedQueueItem: ...
-
-    def complete_decision(
-        self,
-        queue_item_id: str,
-        terminal_status: str,
-        build_records: Callable[
-            [UnresolvedQueueItem],
-            tuple[EntityReference, ResolutionCase, EntityAlias | None],
-        ],
-        *,
-        audit_writer: ReviewAuditWriter,
-        alias_repo: AliasRepository,
-    ) -> tuple[UnresolvedQueueItem, EntityReference, ResolutionCase]: ...
 
 
 class InMemoryEntityRepository:

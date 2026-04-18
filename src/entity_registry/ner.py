@@ -11,6 +11,9 @@ if TYPE_CHECKING:
     from entity_registry.resolution_types import ResolutionContext
 
 
+DEFAULT_HANLP_LITE_NER_MODEL = "MSRA_NER_ELECTRA_SMALL_ZH"
+
+
 class ExtractedMention(BaseModel):
     """One entity mention extracted from free text."""
 
@@ -125,10 +128,10 @@ class HanLPNERExtractor:
 def _default_hanlp_ner_model_name(hanlp: Any) -> str:
     pretrained = getattr(hanlp, "pretrained", None)
     ner_models = getattr(pretrained, "ner", None)
-    model_name = getattr(ner_models, "MSRA_NER_BERT_BASE_ZH", None)
+    model_name = getattr(ner_models, DEFAULT_HANLP_LITE_NER_MODEL, None)
     if isinstance(model_name, str):
         return model_name
-    return "MSRA_NER_BERT_BASE_ZH"
+    return DEFAULT_HANLP_LITE_NER_MODEL
 
 
 def _iter_ner_items(payload: Any, task_name: str | None) -> list[Any]:
@@ -252,6 +255,7 @@ def _optional_float(value: Any) -> float | None:
 
 __all__ = [
     "ExtractedMention",
+    "DEFAULT_HANLP_LITE_NER_MODEL",
     "HanLPNERExtractor",
     "NERExtractor",
     "NullNERExtractor",

@@ -198,10 +198,11 @@ def run_batch_resolution_job(
     resolver: Resolver | None = None,
     fuzzy_matcher: FuzzyMatcher | None = None,
 ) -> BatchResolutionReport:
-    """Run one batch job by delegating every unique source reference to a resolver."""
+    """Run one batch job by delegating each source reference to a resolver."""
 
     active_resolver = resolver if resolver is not None else _resolve_mention_for_batch
     inputs = [_coerce_reference_input(reference) for reference in references]
+    _validate_effective_reference_ids(inputs)
     job.reference_ids = _unique_ids([
         item.source_reference_id
         for item in inputs
@@ -211,23 +212,11 @@ def run_batch_resolution_job(
 
     outcomes: list[BatchResolutionOutcome] = []
     errors: list[str] = []
-    outcomes_by_reference_id: dict[str, BatchResolutionOutcome] = {}
 
     for item in inputs:
-        cached = (
-            outcomes_by_reference_id.get(item.source_reference_id)
-            if item.source_reference_id is not None
-            else None
-        )
-        if cached is not None:
-            outcomes.append(cached.model_copy(deep=True))
-            continue
-
         outcome = _resolve_one(item, active_resolver)
         if outcome.error is not None:
             errors.append(_outcome_error_message(outcome))
-        if item.source_reference_id is not None:
-            outcomes_by_reference_id[item.source_reference_id] = outcome
         outcomes.append(outcome)
 
     groups = cluster_unresolved_references(
@@ -533,11 +522,23 @@ def _resolve_mention_for_batch(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
-        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
-        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
-        existing_reference_id=existing_reference_id,
+        **_reference_id_kwargs(
+            existing_reference_id,
+            repository_context.reference_repo,
+        ),
     )
+
+
+def _reference_id_kwargs(
+    reference_id: str,
+    reference_repo: ReferenceRepository,
+) -> dict[str, str]:
+    if reference_repo.get(reference_id) is None:
+        return {"new_reference_id": reference_id}
+    return {"existing_reference_id": reference_id}
 
 
 def _resolver_accepts_existing_reference_id(resolver: Resolver) -> bool:

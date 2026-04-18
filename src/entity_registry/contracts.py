@@ -6,8 +6,6 @@ import hashlib
 from collections.abc import Sequence
 from typing import Any, Self
 
-import contracts.schemas as _contract_schemas
-import contracts.schemas.entities as _contract_entity_schemas
 from pydantic import model_validator
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
@@ -37,10 +35,6 @@ class ResolutionCase(_ContractResolutionCase):
             )
         return self
 
-
-# Keep contract module imports aligned with the relaxed local boundary schema.
-_contract_schemas.ResolutionCase = ResolutionCase
-_contract_entity_schemas.ResolutionCase = ResolutionCase
 
 ContractCanonicalEntity = CanonicalEntity
 ContractEntityAlias = EntityAlias

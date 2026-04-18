@@ -98,6 +98,7 @@ def test_canonical_entity_builds_and_round_trips() -> None:
     assert restored == entity
     assert payload["canonical_entity_id"] == "ENT_STOCK_300750.SZ"
     assert payload["anchor_code"] == "300750.SZ"
+    assert "canonical_id_rule_version" in payload
 
 
 def test_stock_entity_requires_anchor_code() -> None:
@@ -134,6 +135,7 @@ def test_entity_alias_builds() -> None:
 
     assert alias.alias_type is AliasType.SHORT_NAME
     assert alias.confidence == 1.0
+    assert "canonical_id_rule_version" in alias.model_dump(mode="json")
 
 
 @pytest.mark.parametrize("confidence", [-0.1, 1.1])

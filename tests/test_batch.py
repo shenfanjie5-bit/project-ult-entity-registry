@@ -218,7 +218,7 @@ def test_cluster_unresolved_references_groups_by_normalized_mention_and_candidat
     ]
 
 
-def test_run_batch_resolution_job_delegates_and_dedupes_duplicate_reference_id() -> None:
+def test_run_batch_resolution_job_rejects_duplicate_reference_ids_before_running() -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def resolver(
@@ -229,34 +229,76 @@ def test_run_batch_resolution_job_delegates_and_dedupes_duplicate_reference_id()
         calls.append((raw_mention_text, context))
         return resolved_result(raw_mention_text)
 
-    job = BatchResolutionJob(job_id="job-dedupe", reference_ids=[], status="pending")
-    report = run_batch_resolution_job(
-        job,
-        [
-            {
-                "reference_id": "ref-1",
-                "raw_mention_text": "贵州茅台",
-                "source_context": {"document_id": "doc-1"},
-            },
-            {
-                "reference_id": "ref-1",
-                "raw_mention_text": "贵州茅台",
-                "source_context": {"document_id": "doc-1"},
-            },
-        ],
-        resolver=resolver,
+    job = BatchResolutionJob(job_id="job-duplicate", reference_ids=[], status="pending")
+    with pytest.raises(ValueError, match="duplicate source_reference_id"):
+        run_batch_resolution_job(
+            job,
+            [
+                {
+                    "reference_id": "ref-1",
+                    "raw_mention_text": "贵州茅台",
+                    "source_context": {"document_id": "doc-1"},
+                },
+                {
+                    "reference_id": "ref-1",
+                    "raw_mention_text": "贵州茅台",
+                    "source_context": {"document_id": "doc-1"},
+                },
+            ],
+            resolver=resolver,
+        )
+
+    assert calls == []
+    assert job.status == "pending"
+    assert job.started_at is None
+
+
+def test_run_batch_resolution_job_rejects_duplicate_entity_reference_ids() -> None:
+    first = make_reference("ref-duplicate-direct", "Missing A")
+    second = make_reference("ref-duplicate-direct", "Missing B")
+    job = BatchResolutionJob(
+        job_id="job-duplicate-entity-reference",
+        reference_ids=[],
+        status="pending",
     )
 
-    assert calls == [("贵州茅台", {"document_id": "doc-1"})]
-    assert [outcome.result for outcome in report.outcomes] == [
-        resolved_result("贵州茅台"),
-        resolved_result("贵州茅台"),
-    ]
-    assert report.resolved_reference_ids == ["ref-1"]
-    assert report.job.reference_ids == ["ref-1"]
-    assert report.manual_review_reference_ids == []
-    assert report.job.status == "completed"
-    assert report.job.completed_at is not None
+    with pytest.raises(ValueError, match="duplicate source_reference_id"):
+        run_batch_resolution_job(
+            job,
+            [first, second],
+            resolver=lambda raw_mention_text, context=None: unresolved_result(
+                raw_mention_text
+            ),
+        )
+
+    assert job.status == "pending"
+
+
+def test_run_batch_resolution_job_rejects_duplicate_batch_reference_inputs() -> None:
+    first = BatchReferenceInput(
+        raw_mention_text="Missing A",
+        source_reference_id="ref-duplicate-input",
+    )
+    second = BatchReferenceInput(
+        raw_mention_text="Missing B",
+        source_reference_id="ref-duplicate-input",
+    )
+    job = BatchResolutionJob(
+        job_id="job-duplicate-batch-reference-input",
+        reference_ids=[],
+        status="pending",
+    )
+
+    with pytest.raises(ValueError, match="duplicate source_reference_id"):
+        run_batch_resolution_job(
+            job,
+            [first, second],
+            resolver=lambda raw_mention_text, context=None: unresolved_result(
+                raw_mention_text
+            ),
+        )
+
+    assert job.status == "pending"
 
 
 def test_run_batch_resolution_job_keeps_completed_outcomes_when_one_item_fails() -> None:

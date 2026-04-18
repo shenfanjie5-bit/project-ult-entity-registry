@@ -121,6 +121,7 @@ from entity_registry.storage import (
     InMemoryReviewRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
+    ReviewDecisionUnitOfWork,
     ReviewRepository,
     ResolutionCaseRepository,
 )
@@ -227,7 +228,7 @@ def resolve_mention(
         fuzzy_matcher=repository_context.fuzzy_matcher,
         ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
-        existing_reference_id=reference_id,
+        new_reference_id=reference_id,
     )
     return _contract_case_for_reference(
         reference_id,
@@ -278,7 +279,10 @@ def batch_resolve(
             fuzzy_matcher=repository_context.fuzzy_matcher,
             ner_extractor=repository_context.ner_extractor,
             reasoner_client=repository_context.reasoner_client,
-            existing_reference_id=existing_reference_id,
+            **_public_reference_id_kwargs(
+                existing_reference_id,
+                repository_context.reference_repo,
+            ),
         )
 
     report = _runtime_run_batch_resolution_job(
@@ -383,6 +387,17 @@ def _required_public_batch_text(
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value
+
+
+def _public_reference_id_kwargs(
+    reference_id: str | None,
+    reference_repo: ReferenceRepository,
+) -> dict[str, str]:
+    if reference_id is None:
+        return {}
+    if reference_repo.get(reference_id) is None:
+        return {"new_reference_id": reference_id}
+    return {"existing_reference_id": reference_id}
 
 
 def get_entity_profile(canonical_entity_id: str) -> dict[str, object]:
@@ -570,6 +585,7 @@ __all__ = [
     "ResolutionDecision",
     "ResolutionMethod",
     "ReviewAuditWriter",
+    "ReviewDecisionUnitOfWork",
     "ReviewNotFoundError",
     "ReviewRepository",
     "ReviewStateError",

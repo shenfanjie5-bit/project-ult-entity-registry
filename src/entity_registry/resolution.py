@@ -377,8 +377,8 @@ def resolve_mention(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
-        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
-        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
     )
 
@@ -396,11 +396,24 @@ def resolve_mention_with_repositories(
     ner_extractor: NERExtractor | None = None,
     reasoner_client: ReasonerRuntimeClient | None = None,
     existing_reference_id: str | None = None,
+    new_reference_id: str | None = None,
 ) -> MentionResolutionResult:
     """Resolve one mention using explicit repositories and write audit records."""
 
+    if existing_reference_id is not None and new_reference_id is not None:
+        raise ValueError(
+            "existing_reference_id and new_reference_id are mutually exclusive"
+        )
     if existing_reference_id is not None and not existing_reference_id.strip():
         raise ValueError("existing_reference_id must be a non-empty string")
+    if new_reference_id is not None and not new_reference_id.strip():
+        raise ValueError("new_reference_id must be a non-empty string")
+    reference_id, existing_reference = _reference_id_for_resolution(
+        raw_mention_text,
+        existing_reference_id=existing_reference_id,
+        new_reference_id=new_reference_id,
+        reference_repo=reference_repo,
+    )
 
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates_with_fuzzy(
@@ -426,14 +439,8 @@ def resolve_mention_with_repositories(
     )
     resolution_confidence = decision.confidence if resolved_entity_id is not None else None
     candidate_entity_ids = _candidate_entity_ids(candidate_set)
-
-    existing_reference = (
-        reference_repo.get(existing_reference_id)
-        if existing_reference_id is not None and reference_repo is not None
-        else None
-    )
     reference_payload = {
-        "reference_id": existing_reference_id or _new_reference_id(),
+        "reference_id": reference_id,
         "raw_mention_text": raw_mention_text,
         "source_context": source_context,
         "resolved_entity_id": resolved_entity_id,
@@ -739,6 +746,40 @@ def _save_resolution_audit(
             )
         audit_repo = _RepositoryResolutionAuditRepository(reference_repo, case_repo)
     audit_repo.save_resolution(reference, case)
+
+
+def _reference_id_for_resolution(
+    raw_mention_text: str,
+    *,
+    existing_reference_id: str | None,
+    new_reference_id: str | None,
+    reference_repo: ReferenceRepository | None,
+) -> tuple[str, EntityReference | None]:
+    if existing_reference_id is not None:
+        if reference_repo is None:
+            raise ValueError("existing_reference_id requires reference_repo")
+        existing_reference = reference_repo.get(existing_reference_id)
+        if existing_reference is None:
+            raise ValueError(f"existing reference not found: {existing_reference_id}")
+        if existing_reference.resolved_entity_id is not None:
+            raise ValueError(
+                f"existing reference is already resolved: {existing_reference_id}"
+            )
+        if existing_reference.raw_mention_text != raw_mention_text:
+            raise ValueError(
+                "existing reference raw_mention_text does not match supplied "
+                "raw_mention_text"
+            )
+        return existing_reference_id, existing_reference
+
+    if new_reference_id is not None:
+        if reference_repo is None:
+            raise ValueError("new_reference_id requires reference_repo")
+        if reference_repo.get(new_reference_id) is not None:
+            raise ValueError(f"new reference ID already exists: {new_reference_id}")
+        return new_reference_id, None
+
+    return _new_reference_id(), None
 
 
 def _generate_fuzzy_candidates(
