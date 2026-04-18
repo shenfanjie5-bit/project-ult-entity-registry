@@ -58,6 +58,40 @@ def reset_public_repositories() -> Iterator[None]:
     entity_registry.reset_default_repositories()
 
 
+def _using_sibling_contracts_fallback() -> bool:
+    try:
+        distribution_path = Path(
+            package_distribution("project-ult-contracts")._path,
+        ).resolve()
+    except PackageNotFoundError:
+        return True
+    return distribution_path.is_relative_to(CONTRACTS_SRC.resolve())
+
+
+def _assert_no_candidate_unresolved_payload_schema(
+    payload: dict[str, object],
+) -> None:
+    assert (
+        payload["decision"]
+        == contract_schemas.EntityResolutionDecision.UNRESOLVED
+    )
+    assert payload["candidate_entities"] == []
+
+    try:
+        parsed = contract_schemas.ResolutionCase.model_validate(payload)
+    except ValidationError:
+        if not _using_sibling_contracts_fallback():
+            raise
+        parsed = registry_contracts.ContractResolutionCase.model_validate(payload)
+        assert registry_contracts.ResolutionCase is not contract_schemas.ResolutionCase
+        assert "Entity-registry-owned" in (
+            registry_contracts.ResolutionCase.__doc__ or ""
+        )
+
+    assert parsed.candidate_entities == []
+    assert parsed.resolved_entity is None
+
+
 def test_installed_contracts_dependency_exports_canonical_id_rule_version(
     tmp_path: Path,
 ) -> None:
@@ -178,16 +212,34 @@ def test_root_public_api_payloads_validate_against_contract_schemas() -> None:
         "贵州茅台",
         {"source": "contract-boundary-test"},
     )
+    contract_schemas.ResolutionCase.model_validate(
+        resolution_case.model_dump(mode="json"),
+    )
     registry_contracts.ContractResolutionCase.model_validate(
         resolution_case.model_dump(mode="json"),
+    )
+
+    ambiguous_case = entity_registry.resolve_mention(
+        "宁德时代",
+        {"source": "contract-boundary-test"},
+    )
+    assert (
+        ambiguous_case.decision
+        is contract_schemas.EntityResolutionDecision.AMBIGUOUS
+    )
+    contract_schemas.ResolutionCase.model_validate(
+        ambiguous_case.model_dump(mode="json"),
     )
 
     batch_cases = entity_registry.batch_resolve(["平安银行", "不存在公司"])
     assert len(batch_cases) == 2
     for batch_case in batch_cases:
-        registry_contracts.ContractResolutionCase.model_validate(
-            batch_case.model_dump(mode="json"),
-        )
+        payload = batch_case.model_dump(mode="json")
+        registry_contracts.ContractResolutionCase.model_validate(payload)
+        if batch_case.candidate_entities:
+            contract_schemas.ResolutionCase.model_validate(payload)
+        else:
+            _assert_no_candidate_unresolved_payload_schema(payload)
 
     unresolved_case = entity_registry.register_unresolved_reference(
         {
@@ -196,7 +248,7 @@ def test_root_public_api_payloads_validate_against_contract_schemas() -> None:
             "source_context": {"source": "contract-boundary-test"},
         }
     )
-    registry_contracts.ContractResolutionCase.model_validate(
+    _assert_no_candidate_unresolved_payload_schema(
         unresolved_case.model_dump(mode="json"),
     )
 
@@ -584,17 +636,9 @@ def test_resolution_case_shared_contract_compatibility_is_explicit() -> None:
         ambiguous_case.model_dump(mode="json"),
     )
 
-    no_candidate_payload = no_candidate_case.model_dump(mode="json")
-    try:
-        contract_schemas.ResolutionCase.model_validate(no_candidate_payload)
-    except ValidationError:
-        registry_contracts.ContractResolutionCase.model_validate(no_candidate_payload)
-    else:
-        assert (
-            contract_schemas.ResolutionCase.model_validate(no_candidate_payload)
-            .candidate_entities
-            == []
-        )
+    _assert_no_candidate_unresolved_payload_schema(
+        no_candidate_case.model_dump(mode="json"),
+    )
 
 
 def test_mention_resolution_result_uses_stable_contract_shape() -> None:
