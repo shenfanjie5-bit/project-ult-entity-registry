@@ -423,6 +423,12 @@ def resolve_mention_with_repositories(
             existing_reference,
             raw_mention_text,
         )
+    if source_reference_id is not None and reference_repo is not None:
+        existing_source_reference = reference_repo.get(source_reference_id)
+        if existing_source_reference is not None:
+            raise ValueError(
+                "source_reference_id must not point to an existing reference",
+            )
 
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates_with_fuzzy(

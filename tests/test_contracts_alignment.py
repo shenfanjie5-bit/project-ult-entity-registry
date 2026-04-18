@@ -4,6 +4,9 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import distribution
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 import entity_registry
@@ -54,6 +57,15 @@ def reset_public_repositories() -> Iterator[None]:
 def test_installed_contracts_dependency_exports_canonical_id_rule_version(
     tmp_path: Path,
 ) -> None:
+    try:
+        contracts_distribution = distribution("project-ult-contracts")
+    except PackageNotFoundError:
+        pytest.skip("project-ult-contracts distribution is not installed")
+    if Path(contracts_distribution.locate_file("")).resolve() == (
+        PROJECT_ROOT.parent / "contracts" / "src"
+    ).resolve():
+        pytest.skip("project-ult-contracts is only available from sibling source")
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["ENTITY_REGISTRY_CONTRACTS_SRC"] = str(
@@ -532,7 +544,12 @@ def test_no_candidate_unresolved_contract_validation_is_import_order_safe(
     tmp_path: Path,
 ) -> None:
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(PROJECT_ROOT.parent / "contracts" / "src"),
+            str(PROJECT_ROOT / "src"),
+        ]
+    )
     script = """
 from datetime import UTC, datetime
 

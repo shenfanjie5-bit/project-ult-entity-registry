@@ -6,15 +6,22 @@ import hashlib
 from collections.abc import Sequence
 from typing import Any, Self
 
+import contracts.schemas as _contract_schemas
 from pydantic import model_validator
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
-    CANONICAL_ID_RULE_VERSION,
     CanonicalEntity,
     EntityAlias,
     EntityReference,
     EntityResolutionDecision,
     ResolutionCase as _ContractResolutionCase,
+)
+
+
+CANONICAL_ID_RULE_VERSION = getattr(
+    _contract_schemas,
+    "CANONICAL_ID_RULE_VERSION",
+    "entity-registry-canonical-id-v1",
 )
 
 

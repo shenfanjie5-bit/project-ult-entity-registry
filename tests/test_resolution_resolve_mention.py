@@ -239,6 +239,35 @@ def test_existing_reference_id_must_exist_before_audit_write() -> None:
     assert case_repo.find_by_reference("ref-missing") == []
 
 
+def test_source_reference_id_must_not_overwrite_existing_reference() -> None:
+    entity_repo, alias_repo, reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+    existing = EntityReference(
+        reference_id="ref-existing-source",
+        raw_mention_text="原始引用",
+        source_context={"document_id": "doc-existing"},
+        resolved_entity_id=None,
+        resolution_method=ResolutionMethod.UNRESOLVED,
+        resolution_confidence=None,
+    )
+    reference_repo.save(existing)
+
+    with pytest.raises(ValueError, match="source_reference_id.*existing reference"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            source_reference_id="ref-existing-source",
+        )
+
+    assert reference_repo.get("ref-existing-source") == existing
+    assert case_repo.find_by_reference("ref-existing-source") == []
+
+
 def test_a_h_shared_short_name_returns_unresolved_with_candidate_case() -> None:
     entity_repo, alias_repo, reference_repo, case_repo = (
         initialized_resolution_repositories()
