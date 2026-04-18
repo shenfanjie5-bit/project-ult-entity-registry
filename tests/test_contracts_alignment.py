@@ -1,4 +1,9 @@
+import os
+import subprocess
+import sys
+import tomllib
 from datetime import UTC, datetime
+from pathlib import Path
 
 import entity_registry
 import entity_registry.contracts as registry_contracts
@@ -23,6 +28,68 @@ from entity_registry.resolution_types import MentionResolutionResult
 
 
 NOW = datetime(2026, 4, 15, tzinfo=UTC)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_installed_contracts_dependency_exports_canonical_id_rule_version(
+    tmp_path: Path,
+) -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    env["ENTITY_REGISTRY_CONTRACTS_SRC"] = str(
+        (PROJECT_ROOT.parent / "contracts" / "src").resolve()
+    )
+    script = """
+import importlib.metadata
+import os
+import re
+import sys
+from pathlib import Path
+
+contracts_src = Path(os.environ["ENTITY_REGISTRY_CONTRACTS_SRC"])
+for entry in sys.path:
+    if entry and Path(entry).resolve() == contracts_src:
+        raise AssertionError("sibling contracts/src must not shadow dependency")
+
+import contracts.schemas as contract_schemas
+import entity_registry.contracts as registry_contracts
+
+def version_tuple(value):
+    match = re.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", value)
+    if match is None:
+        raise AssertionError(f"unsupported contracts version: {value}")
+    return tuple(int(part) for part in match.groups())
+
+installed_version = importlib.metadata.version("project-ult-contracts")
+assert version_tuple(installed_version) >= (0, 1, 1)
+assert isinstance(contract_schemas.CANONICAL_ID_RULE_VERSION, str)
+assert contract_schemas.CANONICAL_ID_RULE_VERSION
+assert (
+    registry_contracts.CANONICAL_ID_RULE_VERSION
+    == contract_schemas.CANONICAL_ID_RULE_VERSION
+)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_project_requires_contracts_release_with_rule_version_export() -> None:
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    dependencies = pyproject["project"]["dependencies"]
+
+    assert any(
+        dependency == "project-ult-contracts>=0.1.1"
+        for dependency in dependencies
+    )
 
 
 def test_entity_registry_reexports_contract_entity_schemas() -> None:
