@@ -247,6 +247,9 @@ class InMemoryResolutionAuditReferenceRepository(InMemoryReferenceRepository):
         self._lock = shared_lock
         self._case_repo._lock = shared_lock
 
+    def owned_case_repo(self) -> "InMemoryResolutionCaseRepository":
+        return self._case_repo
+
     def save_resolution(
         self,
         reference: EntityReference,

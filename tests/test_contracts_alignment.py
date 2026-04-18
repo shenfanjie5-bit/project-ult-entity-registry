@@ -33,6 +33,7 @@ from entity_registry.resolution_types import MentionResolutionResult
 from entity_registry.storage import (
     InMemoryAliasRepository,
     InMemoryEntityRepository,
+    InMemoryReferenceRepository,
     InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
 )
@@ -274,6 +275,31 @@ def test_root_public_audit_rejects_mismatched_native_case_repository() -> None:
     assert reference_repo.get("ref-mismatched-audit") is None
     assert case_repo_configured.find_by_reference("ref-mismatched-audit") == []
     assert case_repo_native.find_by_reference("ref-mismatched-audit") == []
+
+
+def test_root_public_audit_rejects_hidden_native_case_repository() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    case_repo_configured = InMemoryResolutionCaseRepository()
+    reference_repo = HiddenNativeAuditReferenceRepository()
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo_configured,
+    )
+
+    with pytest.raises(RuntimeError, match="owned_case_repo"):
+        entity_registry.register_unresolved_reference(
+            {
+                "reference_id": "ref-hidden-audit",
+                "raw_mention_text": "Unknown Hidden",
+            }
+        )
+
+    assert reference_repo.get("ref-hidden-audit") is None
+    assert case_repo_configured.find_by_reference("ref-hidden-audit") == []
+    assert reference_repo.hidden_cases_for_reference("ref-hidden-audit") == []
 
 
 def test_canonical_id_rule_version_tracks_entity_id_rule_not_package_release() -> None:
@@ -590,3 +616,23 @@ class ReconfiguringAuditReferenceRepository(InMemoryResolutionAuditReferenceRepo
     ) -> None:
         super().save_resolution(reference, case)
         self._callback()
+
+
+class HiddenNativeAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self._hidden_native_cases = InMemoryResolutionCaseRepository()
+
+    def save_resolution(
+        self,
+        reference: RuntimeEntityReference,
+        case: RuntimeResolutionCase,
+    ) -> None:
+        self.save(reference)
+        self._hidden_native_cases.save(case)
+
+    def hidden_cases_for_reference(
+        self,
+        reference_id: str,
+    ) -> list[RuntimeResolutionCase]:
+        return self._hidden_native_cases.find_by_reference(reference_id)
