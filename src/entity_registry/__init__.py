@@ -526,19 +526,29 @@ def _validate_public_audit_repository_cohesion(
     if not callable(save_resolution):
         return
 
-    for attribute_name in ("_case_repo", "case_repo", "resolution_case_repo"):
-        native_case_repo = getattr(reference_repo, attribute_name, None)
-        if native_case_repo is None:
-            continue
+    owned_case_repo = getattr(reference_repo, "owned_case_repo", None)
+    if callable(owned_case_repo):
+        native_case_repo = owned_case_repo()
         if native_case_repo is not case_repo:
             raise ValueError(
                 "reference audit repository must write resolution cases to the "
                 "configured case_repo"
             )
         return
+
+    native_case_repo = getattr(reference_repo, "case_repo", None)
+    if native_case_repo is not None:
+        if native_case_repo is not case_repo:
+            raise ValueError(
+                "reference audit repository must write resolution cases to the "
+                "configured case_repo"
+            )
+        return
+
     raise ValueError(
         "reference audit repository with native save_resolution must expose "
-        "an explicit case_repo binding matching the configured case_repo"
+        "an explicit owned_case_repo() or case_repo binding matching the "
+        "configured case_repo"
     )
 
 

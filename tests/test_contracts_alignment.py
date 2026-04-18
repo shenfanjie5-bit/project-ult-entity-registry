@@ -330,7 +330,40 @@ def test_resolve_mention_rejects_hidden_native_audit_repo() -> None:
         case_repo=configured_case_repo,
     )
 
-    with pytest.raises(ValueError, match="explicit case_repo binding"):
+    with pytest.raises(ValueError, match="owned_case_repo"):
+        entity_registry.resolve_mention("贵州茅台")
+
+    assert reference_repo.save_calls == 0
+    assert reference_repo.find_unresolved() == []
+    assert hidden_case_repo._cases == {}
+    assert configured_case_repo._cases == {}
+
+
+def test_resolve_mention_rejects_attr_only_native_audit_repo() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+
+    hidden_case_repo = InMemoryResolutionCaseRepository()
+    configured_case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = AttrOnlyNativeAuditReferenceRepository(
+        configured_case_repo,
+        hidden_case_repo,
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=configured_case_repo,
+    )
+
+    with pytest.raises(ValueError, match="owned_case_repo"):
         entity_registry.resolve_mention("贵州茅台")
 
     assert reference_repo.save_calls == 0
@@ -618,6 +651,27 @@ class ReconfiguringAuditReferenceRepository(InMemoryResolutionAuditReferenceRepo
 class HiddenNativeAuditReferenceRepository(InMemoryReferenceRepository):
     def __init__(self, hidden_case_repo: InMemoryResolutionCaseRepository) -> None:
         super().__init__()
+        self._hidden_native_store = hidden_case_repo
+        self.save_calls = 0
+
+    def save_resolution(
+        self,
+        reference: RuntimeEntityReference,
+        case: RuntimeResolutionCase,
+    ) -> None:
+        self.save_calls += 1
+        self.save(reference)
+        self._hidden_native_store.save(case)
+
+
+class AttrOnlyNativeAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(
+        self,
+        configured_case_repo: InMemoryResolutionCaseRepository,
+        hidden_case_repo: InMemoryResolutionCaseRepository,
+    ) -> None:
+        super().__init__()
+        self._case_repo = configured_case_repo
         self._hidden_native_store = hidden_case_repo
         self.save_calls = 0
 
