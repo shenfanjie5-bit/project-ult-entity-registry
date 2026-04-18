@@ -3,30 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
-import sys
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
 
-
-def _ensure_contracts_importable() -> None:
-    """Prefer installed contracts, with a monorepo sibling fallback for tests."""
-
-    if importlib.util.find_spec("contracts") is not None:
-        return
-
-    project_root = Path(__file__).resolve().parents[3]
-    sibling_contracts_src = project_root / "contracts" / "src"
-    if sibling_contracts_src.exists():
-        sys.path.insert(0, str(sibling_contracts_src))
-
-
-_ensure_contracts_importable()
-
-from contracts.core import ContractBaseModel  # noqa: E402
-from contracts.core import __version__ as CANONICAL_ID_RULE_VERSION  # noqa: E402
-from contracts.schemas import (  # noqa: E402
+from contracts.core import ContractBaseModel
+from contracts.schemas import (
     CanonicalEntity,
     EntityAlias,
     EntityReference,
@@ -34,15 +15,23 @@ from contracts.schemas import (  # noqa: E402
     ResolutionCase,
 )
 
+try:
+    from contracts.schemas import CANONICAL_ID_RULE_VERSION as _CONTRACT_RULE_VERSION
+except ImportError:
+    _CONTRACT_RULE_VERSION = "1"
+
 
 ContractCanonicalEntity = CanonicalEntity
 ContractEntityAlias = EntityAlias
 ContractEntityReference = EntityReference
 ContractResolutionCase = ResolutionCase
+CANONICAL_ID_RULE_VERSION = _CONTRACT_RULE_VERSION
+_NO_CANDIDATE_ENTITY_ID = "ENT_UNRESOLVED_NO_CANDIDATE"
+_NO_CANDIDATE_ENTITY_TYPE = "unresolved"
 
 
 def current_canonical_id_rule_version() -> str:
-    """Return the canonical ID rule version published by contracts."""
+    """Return the stable canonical ID rule version for contract payloads."""
 
     return CANONICAL_ID_RULE_VERSION
 
@@ -105,27 +94,26 @@ def to_contract_resolution_case(
     *,
     input_alias: str,
     candidate_entities: Sequence[Any],
+    decision: EntityResolutionDecision | str,
     resolved_entity: Any | None = None,
     evidence_refs: Sequence[str] | None = None,
     confidence: float | None = None,
 ) -> ResolutionCase:
     """Project an internal resolution case to the contracts audit schema."""
 
-    if not candidate_entities:
-        raise ValueError(
-            "contracts ResolutionCase requires at least one candidate entity"
-        )
-
+    contract_decision = _contract_decision(decision)
+    canonical_id_rule_version = _canonical_rule_version(case)
+    candidate_refs = _contract_candidate_references(
+        candidate_entities,
+        contract_decision,
+        canonical_id_rule_version,
+    )
     selected_entity_id = case.selected_entity_id
-    if selected_entity_id is None:
-        decision = (
-            EntityResolutionDecision.AMBIGUOUS
-            if len(candidate_entities) > 1
-            else EntityResolutionDecision.UNRESOLVED
-        )
-        resolved_contract_entity = None
-    else:
-        decision = EntityResolutionDecision.MATCHED
+    if contract_decision is EntityResolutionDecision.MATCHED:
+        if selected_entity_id is None:
+            raise ValueError(
+                "matched contracts ResolutionCase requires selected_entity_id"
+            )
         selected_entity = resolved_entity or _find_entity(
             selected_entity_id,
             candidate_entities,
@@ -135,20 +123,22 @@ def to_contract_resolution_case(
                 "matched contracts ResolutionCase requires the selected entity"
             )
         resolved_contract_entity = to_contract_entity_reference(selected_entity)
+    else:
+        if selected_entity_id is not None:
+            raise ValueError(
+                "unmatched contracts ResolutionCase must not carry selected_entity_id"
+            )
+        resolved_contract_entity = None
 
-    candidate_refs = [
-        to_contract_entity_reference(entity)
-        for entity in candidate_entities
-    ]
     return ResolutionCase(
         resolution_case_id=case.case_id,
         input_alias=input_alias,
-        decision=decision,
-        confidence=_case_confidence(decision, confidence),
+        decision=contract_decision,
+        confidence=_case_confidence(contract_decision, confidence),
         candidate_entities=candidate_refs,
         evidence_refs=list(evidence_refs or [case.reference_id]),
         resolved_at=case.created_at,
-        canonical_id_rule_version=_canonical_rule_version(case),
+        canonical_id_rule_version=canonical_id_rule_version,
         resolved_entity=resolved_contract_entity,
     )
 
@@ -159,6 +149,40 @@ def _enum_value(value: Any) -> Any:
 
 def _canonical_rule_version(value: Any) -> str:
     return getattr(value, "canonical_id_rule_version", CANONICAL_ID_RULE_VERSION)
+
+
+def _contract_decision(
+    decision: EntityResolutionDecision | str,
+) -> EntityResolutionDecision:
+    if isinstance(decision, EntityResolutionDecision):
+        return decision
+    return EntityResolutionDecision(decision)
+
+
+def _contract_candidate_references(
+    candidate_entities: Sequence[Any],
+    decision: EntityResolutionDecision,
+    canonical_id_rule_version: str,
+) -> list[EntityReference]:
+    if candidate_entities:
+        return [
+            to_contract_entity_reference(entity)
+            for entity in candidate_entities
+        ]
+
+    if decision is EntityResolutionDecision.UNRESOLVED:
+        return [
+            EntityReference(
+                entity_id=_NO_CANDIDATE_ENTITY_ID,
+                entity_type=_NO_CANDIDATE_ENTITY_TYPE,
+                canonical_id_rule_version=canonical_id_rule_version,
+            )
+        ]
+
+    raise ValueError(
+        "contracts ResolutionCase requires candidate entities unless "
+        "decision='unresolved'"
+    )
 
 
 def _stable_contract_id(prefix: str, *parts: str) -> str:
