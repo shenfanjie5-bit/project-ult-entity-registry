@@ -219,6 +219,26 @@ def test_missing_mention_returns_unresolved_and_writes_audit_records() -> None:
     assert cases[0].selected_entity_id is None
 
 
+def test_existing_reference_id_must_exist_before_audit_write() -> None:
+    entity_repo, alias_repo, reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+
+    with pytest.raises(ValueError, match="existing_reference_id.*existing reference"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-missing",
+        )
+
+    assert reference_repo.get("ref-missing") is None
+    assert case_repo.find_by_reference("ref-missing") == []
+
+
 def test_a_h_shared_short_name_returns_unresolved_with_candidate_case() -> None:
     entity_repo, alias_repo, reference_repo, case_repo = (
         initialized_resolution_repositories()
@@ -326,7 +346,8 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
     entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
-    reference_repo = NativeResolutionAuditReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo)
 
     result = resolve_mention_with_repositories(
         "贵州茅台",
@@ -334,7 +355,7 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
         entity_repo=entity_repo,
         alias_repo=alias_repo,
         reference_repo=reference_repo,
-        case_repo=UnexpectedResolutionCaseRepository(),
+        case_repo=case_repo,
     )
 
     references = saved_references(reference_repo)
@@ -426,6 +447,9 @@ class NativeResolutionAuditReferenceRepository(InMemoryReferenceRepository):
         super().__init__()
         self.saved_cases: list[entity_registry.ResolutionCase] = []
         self.case_repo = case_repo
+
+    def owned_case_repo(self) -> InMemoryResolutionCaseRepository | None:
+        return self.case_repo
 
     def save_resolution(
         self,

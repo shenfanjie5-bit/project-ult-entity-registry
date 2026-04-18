@@ -116,16 +116,17 @@ def test_entity_registry_reexports_contract_entity_schemas() -> None:
     assert registry_contracts.CanonicalEntity is contract_schemas.CanonicalEntity
     assert registry_contracts.EntityAlias is contract_schemas.EntityAlias
     assert registry_contracts.EntityReference is contract_schemas.EntityReference
-    assert registry_contracts.ResolutionCase is contract_schemas.ResolutionCase
+    assert registry_contracts.ResolutionCase is not contract_schemas.ResolutionCase
+    assert issubclass(registry_contracts.ResolutionCase, contract_schemas.ResolutionCase)
 
     assert entity_registry.CanonicalEntity is contract_schemas.CanonicalEntity
     assert entity_registry.EntityAlias is contract_schemas.EntityAlias
     assert entity_registry.EntityReference is contract_schemas.EntityReference
-    assert entity_registry.ResolutionCase is contract_schemas.ResolutionCase
+    assert entity_registry.ResolutionCase is registry_contracts.ResolutionCase
     assert entity_registry.ContractCanonicalEntity is contract_schemas.CanonicalEntity
     assert entity_registry.ContractEntityAlias is contract_schemas.EntityAlias
     assert entity_registry.ContractEntityReference is contract_schemas.EntityReference
-    assert entity_registry.ContractResolutionCase is contract_schemas.ResolutionCase
+    assert entity_registry.ContractResolutionCase is registry_contracts.ResolutionCase
     assert not hasattr(entity_registry, "CanonicalEntityProfile")
     assert not hasattr(entity_registry, "MentionResolutionResult")
 
@@ -155,14 +156,14 @@ def test_root_public_api_payloads_validate_against_contract_schemas() -> None:
         "贵州茅台",
         {"source": "contract-boundary-test"},
     )
-    contract_schemas.ResolutionCase.model_validate(
+    registry_contracts.ResolutionCase.model_validate(
         resolution_case.model_dump(mode="json"),
     )
 
     batch_cases = entity_registry.batch_resolve(["平安银行", "不存在公司"])
     assert len(batch_cases) == 2
     for batch_case in batch_cases:
-        contract_schemas.ResolutionCase.model_validate(
+        registry_contracts.ResolutionCase.model_validate(
             batch_case.model_dump(mode="json"),
         )
 
@@ -173,7 +174,7 @@ def test_root_public_api_payloads_validate_against_contract_schemas() -> None:
             "source_context": {"source": "contract-boundary-test"},
         }
     )
-    contract_schemas.ResolutionCase.model_validate(
+    registry_contracts.ResolutionCase.model_validate(
         unresolved_case.model_dump(mode="json"),
     )
 
@@ -246,7 +247,7 @@ def test_root_batch_resolve_uses_one_repository_context_for_audit_conversion() -
     assert batch_cases[0].resolution_case_id == persisted_cases[0].case_id
     assert batch_cases[0].resolved_entity is not None
     assert batch_cases[0].resolved_entity.entity_id == "ENT_STOCK_000001.SZ"
-    contract_schemas.ResolutionCase.model_validate(
+    registry_contracts.ResolutionCase.model_validate(
         batch_cases[0].model_dump(mode="json"),
     )
 
@@ -300,6 +301,62 @@ def test_root_public_audit_rejects_hidden_native_case_repository() -> None:
     assert reference_repo.get("ref-hidden-audit") is None
     assert case_repo_configured.find_by_reference("ref-hidden-audit") == []
     assert reference_repo.hidden_cases_for_reference("ref-hidden-audit") == []
+
+
+def test_root_resolve_mention_rejects_hidden_native_case_repository() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+    case_repo_configured = InMemoryResolutionCaseRepository()
+    reference_repo = HiddenNativeAuditReferenceRepository()
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo_configured,
+    )
+
+    with pytest.raises(RuntimeError, match="owned_case_repo"):
+        entity_registry.resolve_mention("贵州茅台")
+
+    assert reference_repo._references == {}
+    assert case_repo_configured._cases == {}
+    assert reference_repo.hidden_cases() == []
+
+
+def test_root_batch_resolve_rejects_hidden_native_case_repository() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+    case_repo_configured = InMemoryResolutionCaseRepository()
+    reference_repo = HiddenNativeAuditReferenceRepository()
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo_configured,
+    )
+
+    with pytest.raises(RuntimeError, match="owned_case_repo"):
+        entity_registry.batch_resolve(
+            [{"reference_id": "ref-hidden-batch", "raw_mention_text": "贵州茅台"}],
+        )
+
+    assert reference_repo.get("ref-hidden-batch") is None
+    assert case_repo_configured.find_by_reference("ref-hidden-batch") == []
+    assert reference_repo.hidden_cases() == []
 
 
 def test_canonical_id_rule_version_tracks_entity_id_rule_not_package_release() -> None:
@@ -382,7 +439,7 @@ def test_internal_resolution_case_projects_to_contract_schema() -> None:
         decision=contract_schemas.EntityResolutionDecision.MATCHED,
     )
 
-    assert isinstance(contract_case, contract_schemas.ResolutionCase)
+    assert isinstance(contract_case, registry_contracts.ResolutionCase)
     assert contract_case.resolution_case_id == "case-1"
     assert contract_case.input_alias == "CATL"
     assert contract_case.decision is contract_schemas.EntityResolutionDecision.MATCHED
@@ -466,7 +523,7 @@ def test_no_candidate_unresolved_case_projects_to_contract_schema() -> None:
     assert dumped["candidate_entities"] == []
     assert "ENT_UNRESOLVED_NO_CANDIDATE" not in str(dumped)
 
-    reparsed = contract_schemas.ResolutionCase.model_validate(dumped)
+    reparsed = registry_contracts.ResolutionCase.model_validate(dumped)
     assert reparsed.candidate_entities == []
     assert reparsed.resolved_entity is None
 
@@ -479,22 +536,32 @@ def test_no_candidate_unresolved_contract_validation_is_import_order_safe(
     script = """
 from datetime import UTC, datetime
 
+from pydantic import ValidationError
 from contracts.schemas import ResolutionCase
-import entity_registry.contracts
+import contracts.schemas as contract_schemas
+import entity_registry.contracts as registry_contracts
 
-case = ResolutionCase.model_validate(
-    {
-        "resolution_case_id": "case-import-order",
-        "input_alias": "不存在公司",
-        "decision": "unresolved",
-        "confidence": 0.0,
-        "candidate_entities": [],
-        "evidence_refs": ["ref-import-order"],
-        "resolved_at": datetime.now(UTC).isoformat(),
-        "canonical_id_rule_version": "v1",
-        "resolved_entity": None,
-    }
-)
+payload = {
+    "resolution_case_id": "case-import-order",
+    "input_alias": "不存在公司",
+    "decision": "unresolved",
+    "confidence": 0.0,
+    "candidate_entities": [],
+    "evidence_refs": ["ref-import-order"],
+    "resolved_at": datetime.now(UTC).isoformat(),
+    "canonical_id_rule_version": "v1",
+    "resolved_entity": None,
+}
+
+try:
+    ResolutionCase.model_validate(payload)
+except ValidationError:
+    pass
+else:
+    raise AssertionError("pre-imported contracts ResolutionCase was relaxed")
+
+assert contract_schemas.ResolutionCase is ResolutionCase
+case = registry_contracts.ResolutionCase.model_validate(payload)
 assert case.candidate_entities == []
 assert case.resolved_entity is None
 """
@@ -636,3 +703,6 @@ class HiddenNativeAuditReferenceRepository(InMemoryReferenceRepository):
         reference_id: str,
     ) -> list[RuntimeResolutionCase]:
         return self._hidden_native_cases.find_by_reference(reference_id)
+
+    def hidden_cases(self) -> list[RuntimeResolutionCase]:
+        return list(self._hidden_native_cases._cases.values())

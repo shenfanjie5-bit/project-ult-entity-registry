@@ -84,14 +84,17 @@ class _RepositoryResolutionAuditRepository:
             "save_resolution",
             None,
         )
-        if callable(native_save_resolution):
-            native_save_resolution(reference, case)
-            return
+        if not callable(native_save_resolution):
+            raise ResolutionAuditRepositoryRequiredError(
+                "resolution audit writes require a native save_resolution(reference, case) "
+                "unit of work; separate reference/case writes are not supported",
+            )
 
-        raise ResolutionAuditRepositoryRequiredError(
-            "resolution audit writes require a native save_resolution(reference, case) "
-            "unit of work; separate reference/case writes are not supported",
+        _validate_repository_audit_cohesion(
+            self._reference_repo,
+            self._case_repo,
         )
+        native_save_resolution(reference, case)
 
 
 class DeterministicMatcher:
@@ -396,18 +399,26 @@ def resolve_mention_with_repositories(
     ner_extractor: NERExtractor | None = None,
     reasoner_client: ReasonerRuntimeClient | None = None,
     existing_reference_id: str | None = None,
+    source_reference_id: str | None = None,
 ) -> MentionResolutionResult:
     """Resolve one mention using explicit repositories and write audit records."""
 
     if existing_reference_id is not None and not existing_reference_id.strip():
         raise ValueError("existing_reference_id must be a non-empty string")
+    if source_reference_id is not None and not source_reference_id.strip():
+        raise ValueError("source_reference_id must be a non-empty string")
+    if existing_reference_id is not None and source_reference_id is not None:
+        raise ValueError(
+            "existing_reference_id and source_reference_id cannot both be provided",
+        )
 
-    existing_reference = (
-        reference_repo.get(existing_reference_id)
-        if existing_reference_id is not None and reference_repo is not None
-        else None
-    )
-    if existing_reference is not None:
+    existing_reference = None
+    if existing_reference_id is not None:
+        if reference_repo is None:
+            raise ValueError("existing_reference_id requires reference_repo")
+        existing_reference = reference_repo.get(existing_reference_id)
+        if existing_reference is None:
+            raise ValueError("existing_reference_id must point to an existing reference")
         _validate_existing_reference_for_resolution(
             existing_reference,
             raw_mention_text,
@@ -443,7 +454,11 @@ def resolve_mention_with_repositories(
     candidate_entity_ids = _candidate_entity_ids(candidate_set)
 
     reference_payload = {
-        "reference_id": existing_reference_id or _new_reference_id(),
+        "reference_id": (
+            existing_reference_id
+            or source_reference_id
+            or _new_reference_id()
+        ),
         "raw_mention_text": raw_mention_text,
         "source_context": source_context,
         "resolved_entity_id": resolved_entity_id,
@@ -493,6 +508,26 @@ def _validate_existing_reference_for_resolution(
         raise ValueError(
             "existing_reference_id raw_mention_text does not match input",
         )
+
+
+def _validate_repository_audit_cohesion(
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+) -> None:
+    owned_case_repo = getattr(reference_repo, "owned_case_repo", None)
+    if not callable(owned_case_repo):
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit repository must expose owned_case_repo() to prove "
+            "it shares the configured case repository",
+        )
+
+    if owned_case_repo() is case_repo:
+        return
+
+    raise ResolutionAuditRepositoryRequiredError(
+        "resolution audit repository and case repository must share the same "
+        "native audit unit of work",
+    )
 
 
 def _resolve_candidate_set_decision(

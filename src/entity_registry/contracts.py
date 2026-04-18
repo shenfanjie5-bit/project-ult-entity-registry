@@ -6,8 +6,6 @@ import hashlib
 from collections.abc import Sequence
 from typing import Any, Self
 
-import contracts.schemas as _contract_schemas
-import contracts.schemas.entities as _contract_entity_schemas
 from pydantic import model_validator
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
@@ -18,33 +16,6 @@ from contracts.schemas import (
     EntityResolutionDecision,
     ResolutionCase as _ContractResolutionCase,
 )
-
-
-def _relax_contract_resolution_case_candidates(model_cls: type[Any]) -> None:
-    field = model_cls.model_fields.get("candidate_entities")
-    if field is None:
-        return
-
-    metadata = [
-        item
-        for item in field.metadata
-        if not _is_candidate_min_length_constraint(item)
-    ]
-    if len(metadata) == len(field.metadata):
-        return
-
-    field.metadata = metadata
-    model_cls.model_rebuild(force=True)
-
-
-def _is_candidate_min_length_constraint(item: object) -> bool:
-    return (
-        item.__class__.__name__ == "MinLen"
-        and getattr(item, "min_length", None) == 1
-    )
-
-
-_relax_contract_resolution_case_candidates(_ContractResolutionCase)
 
 
 class ResolutionCase(_ContractResolutionCase):
@@ -64,10 +35,6 @@ class ResolutionCase(_ContractResolutionCase):
             )
         return self
 
-
-# Keep contract module imports aligned with the relaxed local boundary schema.
-_contract_schemas.ResolutionCase = ResolutionCase
-_contract_entity_schemas.ResolutionCase = ResolutionCase
 
 ContractCanonicalEntity = CanonicalEntity
 ContractEntityAlias = EntityAlias

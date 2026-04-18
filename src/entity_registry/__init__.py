@@ -228,7 +228,7 @@ def resolve_mention(
         fuzzy_matcher=repository_context.fuzzy_matcher,
         ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
-        existing_reference_id=reference_id,
+        source_reference_id=reference_id,
     )
     return _contract_case_for_reference(
         reference_id,
@@ -269,6 +269,17 @@ def batch_resolve(
         *,
         existing_reference_id: str | None = None,
     ) -> _RuntimeMentionResolutionResult:
+        reference_id_argument: dict[str, str] = {}
+        if existing_reference_id is not None:
+            existing_reference = repository_context.reference_repo.get(
+                existing_reference_id,
+            )
+            reference_id_argument = (
+                {"existing_reference_id": existing_reference_id}
+                if existing_reference is not None
+                else {"source_reference_id": existing_reference_id}
+            )
+
         return _runtime_resolve_mention_with_repositories(
             raw_mention_text,
             context,
@@ -279,7 +290,7 @@ def batch_resolve(
             fuzzy_matcher=repository_context.fuzzy_matcher,
             ner_extractor=repository_context.ner_extractor,
             reasoner_client=repository_context.reasoner_client,
-            existing_reference_id=existing_reference_id,
+            **reference_id_argument,
         )
 
     report = _runtime_run_batch_resolution_job(
