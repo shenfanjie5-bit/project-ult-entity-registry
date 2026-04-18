@@ -40,7 +40,7 @@ from entity_registry.batch import (
     BatchResolutionOutcome,
     BatchResolutionReport,
     batch_resolve_with_report,
-    batch_resolve_with_report as _runtime_batch_resolve_with_report,
+    run_batch_resolution_job as _runtime_run_batch_resolution_job,
 )
 from entity_registry.fuzzy import (
     FuzzyCandidate,
@@ -243,12 +243,62 @@ def batch_resolve(
 ) -> list[ContractResolutionCase]:
     """Resolve a batch of mentions and return contract resolution cases."""
 
-    from entity_registry.init import _get_default_repository_context
+    from entity_registry.init import (
+        RepositoryNotConfiguredError,
+        _get_default_repository_context,
+    )
 
-    report = _runtime_batch_resolve_with_report(references)
     repository_context = _get_default_repository_context()
-    if repository_context.case_repo is None:
-        raise RuntimeError("resolution audit repository context disappeared")
+    if (
+        repository_context.reference_repo is None
+        or repository_context.case_repo is None
+    ):
+        raise RepositoryNotConfiguredError(
+            "resolution audit repositories are not configured; "
+            "call configure_default_repositories(..., reference_repo=..., "
+            "case_repo=...) before using public resolution APIs, or use "
+            "configure_default_in_memory_audit_repositories() for tests/local workflows",
+        )
+
+    normalized_inputs = _public_batch_inputs_with_reference_ids(references)
+
+    def resolve_with_captured_context(
+        raw_mention_text: str,
+        context: ResolutionContext | dict[str, object] | None = None,
+        *,
+        existing_reference_id: str | None = None,
+    ) -> _RuntimeMentionResolutionResult:
+        return _runtime_resolve_mention_with_repositories(
+            raw_mention_text,
+            context,
+            entity_repo=repository_context.entity_repo,
+            alias_repo=repository_context.alias_repo,
+            reference_repo=repository_context.reference_repo,
+            case_repo=repository_context.case_repo,
+            fuzzy_matcher=repository_context.fuzzy_matcher,
+            ner_extractor=repository_context.ner_extractor,
+            reasoner_client=repository_context.reasoner_client,
+            existing_reference_id=existing_reference_id,
+        )
+
+    report = _runtime_run_batch_resolution_job(
+        BatchResolutionJob(
+            job_id=_new_public_batch_job_id(),
+            reference_ids=[
+                item.source_reference_id
+                for item in normalized_inputs
+                if item.source_reference_id is not None
+            ],
+            status="pending",
+        ),
+        normalized_inputs,
+        resolver=resolve_with_captured_context,
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+    )
+    if report.errors:
+        raise RuntimeError(
+            "batch resolution failed: " + "; ".join(report.errors),
+        )
 
     return [
         _contract_case_for_reference(
@@ -261,6 +311,78 @@ def batch_resolve(
         for outcome in report.outcomes
         if outcome.source_reference_id is not None
     ]
+
+
+def _public_batch_inputs_with_reference_ids(
+    references: Sequence[_RuntimeEntityReference | dict[str, object] | str],
+) -> list[BatchReferenceInput]:
+    normalized_inputs: list[BatchReferenceInput] = []
+    seen_reference_ids: set[str] = set()
+    for reference in references:
+        item = _coerce_public_batch_reference_input(reference)
+        if item.source_reference_id is None:
+            item = item.model_copy(
+                update={"source_reference_id": _new_public_reference_id()},
+            )
+        if item.source_reference_id in seen_reference_ids:
+            raise ValueError(
+                "duplicate source_reference_id in batch inputs: "
+                f"{item.source_reference_id}"
+            )
+        seen_reference_ids.add(item.source_reference_id)
+        normalized_inputs.append(item)
+    return normalized_inputs
+
+
+def _coerce_public_batch_reference_input(
+    reference: _RuntimeEntityReference | BatchReferenceInput | dict[str, object] | str,
+) -> BatchReferenceInput:
+    if isinstance(reference, BatchReferenceInput):
+        return reference
+    if isinstance(reference, _RuntimeEntityReference):
+        return BatchReferenceInput(
+            raw_mention_text=reference.raw_mention_text,
+            source_context=dict(reference.source_context),
+            source_reference_id=reference.reference_id,
+        )
+    if isinstance(reference, str):
+        return BatchReferenceInput(raw_mention_text=reference)
+    if isinstance(reference, dict):
+        payload = dict(reference)
+        source_context = payload.get("source_context", {})
+        if source_context is None:
+            source_context = {}
+        if not isinstance(source_context, dict):
+            raise ValueError("source_context must be a dictionary")
+
+        source_reference_id = payload.get("source_reference_id")
+        if source_reference_id is None:
+            source_reference_id = payload.get("reference_id")
+        if source_reference_id is not None and not isinstance(
+            source_reference_id,
+            str,
+        ):
+            raise ValueError("source_reference_id must be a string when provided")
+
+        return BatchReferenceInput(
+            raw_mention_text=_required_public_batch_text(
+                payload,
+                "raw_mention_text",
+            ),
+            source_context=dict(source_context),
+            source_reference_id=source_reference_id,
+        )
+    raise TypeError("batch references must be EntityReference, dict, or str")
+
+
+def _required_public_batch_text(
+    payload: dict[str, object],
+    field_name: str,
+) -> str:
+    value = payload.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value
 
 
 def get_entity_profile(canonical_entity_id: str) -> dict[str, object]:
@@ -389,6 +511,10 @@ def _new_public_reference_id() -> str:
 
 def _new_public_case_id() -> str:
     return f"CASE_{uuid4().hex}"
+
+
+def _new_public_batch_job_id() -> str:
+    return f"BATCH_{uuid4().hex}"
 
 
 __all__ = [
