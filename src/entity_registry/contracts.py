@@ -20,6 +20,33 @@ from contracts.schemas import (
 )
 
 
+def _relax_contract_resolution_case_candidates(model_cls: type[Any]) -> None:
+    field = model_cls.model_fields.get("candidate_entities")
+    if field is None:
+        return
+
+    metadata = [
+        item
+        for item in field.metadata
+        if not _is_candidate_min_length_constraint(item)
+    ]
+    if len(metadata) == len(field.metadata):
+        return
+
+    field.metadata = metadata
+    model_cls.model_rebuild(force=True)
+
+
+def _is_candidate_min_length_constraint(item: object) -> bool:
+    return (
+        item.__class__.__name__ == "MinLen"
+        and getattr(item, "min_length", None) == 1
+    )
+
+
+_relax_contract_resolution_case_candidates(_ContractResolutionCase)
+
+
 class ResolutionCase(_ContractResolutionCase):
     """Contract resolution case with explicit no-candidate unresolved support."""
 

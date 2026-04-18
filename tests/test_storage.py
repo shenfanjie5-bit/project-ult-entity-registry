@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+import entity_registry
 from entity_registry.core import (
     AliasType,
     CanonicalEntity,
@@ -30,6 +31,7 @@ from entity_registry.storage import (
     InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
+    ReviewDecisionUnitOfWork,
     ReviewRepository,
     ResolutionCaseRepository,
 )
@@ -426,6 +428,13 @@ def test_review_repository_protocol_is_usable_for_in_memory() -> None:
     repository: ReviewRepository = InMemoryReviewRepository()
 
     assert repository.list_by_status(REVIEW_STATUS_PENDING) == []
+
+
+def test_review_decision_unit_of_work_protocol_is_usable_for_in_memory() -> None:
+    repository: ReviewDecisionUnitOfWork = InMemoryReviewRepository()
+
+    assert callable(repository.complete_decision)
+    assert entity_registry.ReviewDecisionUnitOfWork is ReviewDecisionUnitOfWork
 
 
 def test_in_memory_review_repository_saves_and_finds_queue_items() -> None:

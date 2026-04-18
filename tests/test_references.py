@@ -261,9 +261,11 @@ def test_entity_reference_round_trips_without_data_loss() -> None:
         created_at=datetime(2026, 4, 15, tzinfo=UTC),
     )
 
-    restored = EntityReference.model_validate(reference.model_dump(mode="json"))
+    payload = reference.model_dump(mode="json")
+    restored = EntityReference.model_validate(payload)
 
     assert restored == reference
+    assert payload["canonical_id_rule_version"]
 
 
 def test_resolution_case_builds() -> None:
@@ -279,6 +281,7 @@ def test_resolution_case_builds() -> None:
 
     assert case.selected_entity_id == "ENT_STOCK_300750.SZ"
     assert case.decision_type is DecisionType.AUTO
+    assert case.model_dump(mode="json")["canonical_id_rule_version"]
 
 
 def test_resolution_case_supports_unresolved_selection() -> None:

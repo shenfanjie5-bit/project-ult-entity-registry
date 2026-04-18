@@ -250,6 +250,32 @@ def test_root_batch_resolve_uses_one_repository_context_for_audit_conversion() -
     )
 
 
+def test_root_public_audit_rejects_mismatched_native_case_repository() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    case_repo_configured = InMemoryResolutionCaseRepository()
+    case_repo_native = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo_native)
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo_configured,
+    )
+
+    with pytest.raises(RuntimeError, match="same native audit unit of work"):
+        entity_registry.register_unresolved_reference(
+            {
+                "reference_id": "ref-mismatched-audit",
+                "raw_mention_text": "Unknown Mismatch",
+            }
+        )
+
+    assert reference_repo.get("ref-mismatched-audit") is None
+    assert case_repo_configured.find_by_reference("ref-mismatched-audit") == []
+    assert case_repo_native.find_by_reference("ref-mismatched-audit") == []
+
+
 def test_canonical_id_rule_version_tracks_entity_id_rule_not_package_release() -> None:
     entity = make_entity()
     alias = make_alias()
@@ -417,6 +443,46 @@ def test_no_candidate_unresolved_case_projects_to_contract_schema() -> None:
     reparsed = contract_schemas.ResolutionCase.model_validate(dumped)
     assert reparsed.candidate_entities == []
     assert reparsed.resolved_entity is None
+
+
+def test_no_candidate_unresolved_contract_validation_is_import_order_safe(
+    tmp_path: Path,
+) -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    script = """
+from datetime import UTC, datetime
+
+from contracts.schemas import ResolutionCase
+import entity_registry.contracts
+
+case = ResolutionCase.model_validate(
+    {
+        "resolution_case_id": "case-import-order",
+        "input_alias": "不存在公司",
+        "decision": "unresolved",
+        "confidence": 0.0,
+        "candidate_entities": [],
+        "evidence_refs": ["ref-import-order"],
+        "resolved_at": datetime.now(UTC).isoformat(),
+        "canonical_id_rule_version": "v1",
+        "resolved_entity": None,
+    }
+)
+assert case.candidate_entities == []
+assert case.resolved_entity is None
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_mention_resolution_result_uses_stable_contract_shape() -> None:

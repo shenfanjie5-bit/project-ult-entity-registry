@@ -121,6 +121,7 @@ from entity_registry.storage import (
     InMemoryReviewRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
+    ReviewDecisionUnitOfWork,
     ReviewRepository,
     ResolutionCaseRepository,
 )
@@ -468,6 +469,7 @@ def _save_public_resolution_audit(
             "resolution audit writes require a native save_resolution(reference, case) "
             "unit of work; separate reference/case writes are not supported",
         )
+    _validate_public_audit_repository_cohesion(reference_repo, case_repo)
 
     previous_reference = reference_repo.get(reference.reference_id)
     try:
@@ -492,6 +494,22 @@ def _save_public_resolution_audit(
             f"resolution case {case.case_id}",
         )
     return persisted_case
+
+
+def _validate_public_audit_repository_cohesion(
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+) -> None:
+    native_case_repo = getattr(reference_repo, "_case_repo", None)
+    if native_case_repo is None:
+        native_case_repo = getattr(reference_repo, "case_repo", None)
+    if native_case_repo is None or native_case_repo is case_repo:
+        return
+
+    raise ResolutionAuditRepositoryRequiredError(
+        "resolution audit repository and case repository must share the same "
+        "native audit unit of work",
+    )
 
 
 def _restore_reference_after_audit_failure(
@@ -570,6 +588,7 @@ __all__ = [
     "ResolutionDecision",
     "ResolutionMethod",
     "ReviewAuditWriter",
+    "ReviewDecisionUnitOfWork",
     "ReviewNotFoundError",
     "ReviewRepository",
     "ReviewStateError",

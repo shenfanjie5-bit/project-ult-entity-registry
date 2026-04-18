@@ -198,10 +198,11 @@ def run_batch_resolution_job(
     resolver: Resolver | None = None,
     fuzzy_matcher: FuzzyMatcher | None = None,
 ) -> BatchResolutionReport:
-    """Run one batch job by delegating every unique source reference to a resolver."""
+    """Run one batch job by delegating each source reference to a resolver."""
 
     active_resolver = resolver if resolver is not None else _resolve_mention_for_batch
     inputs = [_coerce_reference_input(reference) for reference in references]
+    _validate_effective_reference_ids(inputs)
     job.reference_ids = _unique_ids([
         item.source_reference_id
         for item in inputs

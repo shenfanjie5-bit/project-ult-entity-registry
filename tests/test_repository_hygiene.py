@@ -18,21 +18,9 @@ def test_generated_python_artifacts_are_not_tracked() -> None:
         pytest.skip("git metadata is unavailable")
 
     tracked_files = result.stdout.splitlines()
-    deleted_result = subprocess.run(
-        ["git", "ls-files", "--deleted"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    deleted_files = (
-        set(deleted_result.stdout.splitlines())
-        if deleted_result.returncode == 0
-        else set()
-    )
     offenders = [
         path
         for path in tracked_files
-        if path not in deleted_files
         if _is_generated_python_artifact(path)
     ]
 

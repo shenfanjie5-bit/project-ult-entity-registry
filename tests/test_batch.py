@@ -218,7 +218,7 @@ def test_cluster_unresolved_references_groups_by_normalized_mention_and_candidat
     ]
 
 
-def test_run_batch_resolution_job_delegates_and_dedupes_duplicate_reference_id() -> None:
+def test_run_batch_resolution_job_rejects_duplicate_reference_ids_before_resolver() -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def resolver(
@@ -230,33 +230,27 @@ def test_run_batch_resolution_job_delegates_and_dedupes_duplicate_reference_id()
         return resolved_result(raw_mention_text)
 
     job = BatchResolutionJob(job_id="job-dedupe", reference_ids=[], status="pending")
-    report = run_batch_resolution_job(
-        job,
-        [
-            {
-                "reference_id": "ref-1",
-                "raw_mention_text": "贵州茅台",
-                "source_context": {"document_id": "doc-1"},
-            },
-            {
-                "reference_id": "ref-1",
-                "raw_mention_text": "贵州茅台",
-                "source_context": {"document_id": "doc-1"},
-            },
-        ],
-        resolver=resolver,
-    )
+    with pytest.raises(ValueError, match="duplicate source_reference_id"):
+        run_batch_resolution_job(
+            job,
+            [
+                BatchReferenceInput(
+                    source_reference_id="ref-1",
+                    raw_mention_text="贵州茅台",
+                    source_context={"document_id": "doc-1"},
+                ),
+                BatchReferenceInput(
+                    source_reference_id="ref-1",
+                    raw_mention_text="贵州茅台",
+                    source_context={"document_id": "doc-1"},
+                ),
+            ],
+            resolver=resolver,
+        )
 
-    assert calls == [("贵州茅台", {"document_id": "doc-1"})]
-    assert [outcome.result for outcome in report.outcomes] == [
-        resolved_result("贵州茅台"),
-        resolved_result("贵州茅台"),
-    ]
-    assert report.resolved_reference_ids == ["ref-1"]
-    assert report.job.reference_ids == ["ref-1"]
-    assert report.manual_review_reference_ids == []
-    assert report.job.status == "completed"
-    assert report.job.completed_at is not None
+    assert calls == []
+    assert job.status == "pending"
+    assert job.started_at is None
 
 
 def test_run_batch_resolution_job_keeps_completed_outcomes_when_one_item_fails() -> None:
@@ -361,6 +355,37 @@ def test_backfill_resolution_updates_original_unresolved_reference_id() -> None:
     )
     assert report.resolved_reference_ids == ["ref-backfill"]
     assert report.manual_review_reference_ids == []
+
+
+def test_batch_resolve_rejects_resolved_existing_reference_id_without_overwrite() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    original = make_reference(
+        "ref-victim",
+        "Original Victim",
+        resolved_entity_id="ENT_STOCK_000001.SZ",
+    )
+    reference_repo.save(original)
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    with pytest.raises(RuntimeError, match="existing_reference_id"):
+        batch_resolve(
+            [
+                {
+                    "reference_id": "ref-victim",
+                    "raw_mention_text": "贵州茅台",
+                }
+            ]
+        )
+
+    assert reference_repo.get("ref-victim") == original
+    assert case_repo.find_by_reference("ref-victim") == []
 
 
 def test_run_batch_resolution_job_threads_fuzzy_matcher_into_manual_review_groups() -> None:
@@ -599,6 +624,138 @@ def test_batch_resolve_with_report_enqueues_review_items_and_supports_decisions(
     assert len(manual_aliases) == 1
 
 
+def test_run_batch_manual_review_end_to_end_rejects_and_promotes_alias() -> None:
+    entity_repo, alias_repo = initialized_repositories()
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(case_repo)
+    review_repo = InMemoryReviewRepository()
+    fuzzy_matcher = RecordingFuzzyMatcher(
+        {
+            "宁德时代新能源": [
+                make_candidate(
+                    "ENT_STOCK_300750.SZ",
+                    score=0.91,
+                    alias_text="宁德时代新能源科技股份有限公司",
+                ),
+                make_candidate(
+                    "ENT_STOCK_03750.HK",
+                    score=0.90,
+                    alias_text="宁德时代新能源科技股份有限公司",
+                ),
+            ]
+        }
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        fuzzy_matcher=fuzzy_matcher,
+    )
+    job = BatchResolutionJob(
+        job_id="job-manual-review-end-to-end",
+        reference_ids=[],
+        status="pending",
+    )
+
+    report = run_batch_resolution_job(
+        job,
+        [
+            BatchReferenceInput(
+                raw_mention_text="Unlisted Manual Reject",
+                source_reference_id="ref-manual-reject",
+            ),
+            BatchReferenceInput(
+                raw_mention_text="宁德时代新能源",
+                source_reference_id="ref-manual-promote",
+            ),
+        ],
+        fuzzy_matcher=fuzzy_matcher,
+    )
+    items = entity_registry.enqueue_batch_manual_review(
+        report,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+
+    reject_item = next(
+        item for item in items if item.reference_id == "ref-manual-reject"
+    )
+    promote_item = next(
+        item for item in items if item.reference_id == "ref-manual-promote"
+    )
+    entity_registry.claim_review_item(
+        reject_item.queue_item_id,
+        "reviewer-reject",
+        review_repo=review_repo,
+    )
+    entity_registry.submit_manual_review_decision(
+        reject_item.queue_item_id,
+        entity_registry.ManualReviewDecision(
+            selected_entity_id=None,
+            confidence=None,
+            rationale="no listed entity match",
+        ),
+        review_repo=review_repo,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_writer=reference_repo,
+    )
+    entity_registry.claim_review_item(
+        promote_item.queue_item_id,
+        "reviewer-promote",
+        review_repo=review_repo,
+    )
+    entity_registry.submit_manual_review_decision(
+        promote_item.queue_item_id,
+        entity_registry.ManualReviewDecision(
+            selected_entity_id="ENT_STOCK_300750.SZ",
+            confidence=0.94,
+            rationale="reviewer selected A-share listing",
+            promote_alias=True,
+            alias_type=AliasType.SHORT_NAME,
+        ),
+        review_repo=review_repo,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_writer=reference_repo,
+    )
+
+    rejected_audit = entity_registry.get_resolution_audit_payload(
+        "ref-manual-reject",
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+    promoted_audit = entity_registry.get_resolution_audit_payload(
+        "ref-manual-promote",
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        review_repo=review_repo,
+    )
+    promoted_aliases = [
+        alias
+        for alias in alias_repo.find_by_entity("ENT_STOCK_300750.SZ")
+        if alias.alias_text == "宁德时代新能源"
+        and alias.source == "manual_review"
+    ]
+
+    assert report.manual_review_reference_ids == [
+        "ref-manual-reject",
+        "ref-manual-promote",
+    ]
+    assert rejected_audit.unresolved is True
+    assert rejected_audit.queue_item.status == "rejected"
+    assert promoted_audit.unresolved is False
+    assert (
+        promoted_audit.entity_reference.resolved_entity_id
+        == "ENT_STOCK_300750.SZ"
+    )
+    assert promoted_audit.queue_item.status == "promoted"
+    assert len(promoted_aliases) == 1
+
+
 def test_batch_resolve_with_report_returns_report_when_review_enqueue_fails() -> None:
     entity_repo, alias_repo = initialized_repositories()
     case_repo = InMemoryResolutionCaseRepository()
@@ -763,6 +920,37 @@ def test_batch_resolve_with_report_rejects_embedded_invalid_reference_ids_before
     assert reference_repo._references == {}
     assert case_repo._cases == {}
     assert review_repo.list_by_status("pending") == []
+
+
+def test_run_batch_resolution_job_rejects_duplicate_entity_reference_ids_before_writes() -> None:
+    calls: list[str] = []
+
+    def resolver(
+        raw_mention_text: str,
+        context: object = None,
+    ) -> MentionResolutionResult:
+        calls.append(raw_mention_text)
+        return resolved_result(raw_mention_text)
+
+    job = BatchResolutionJob(
+        job_id="job-duplicate-entity-reference",
+        reference_ids=[],
+        status="pending",
+    )
+
+    with pytest.raises(ValueError, match="duplicate source_reference_id"):
+        run_batch_resolution_job(
+            job,
+            [
+                make_reference("ref-duplicate-entity", "Duplicate Entity Ref"),
+                make_reference("ref-duplicate-entity", "Duplicate Entity Ref"),
+            ],
+            resolver=resolver,
+        )
+
+    assert calls == []
+    assert job.status == "pending"
+    assert job.started_at is None
 
 
 def test_manual_review_routing_keeps_a_h_shared_short_name_unresolved() -> None:

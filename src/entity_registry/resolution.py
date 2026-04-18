@@ -377,8 +377,8 @@ def resolve_mention(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
-        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
-        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
     )
 
@@ -402,6 +402,17 @@ def resolve_mention_with_repositories(
     if existing_reference_id is not None and not existing_reference_id.strip():
         raise ValueError("existing_reference_id must be a non-empty string")
 
+    existing_reference = (
+        reference_repo.get(existing_reference_id)
+        if existing_reference_id is not None and reference_repo is not None
+        else None
+    )
+    if existing_reference is not None:
+        _validate_existing_reference_for_resolution(
+            existing_reference,
+            raw_mention_text,
+        )
+
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates_with_fuzzy(
         raw_mention_text,
@@ -424,14 +435,13 @@ def resolve_mention_with_repositories(
         if resolved_entity_id is not None
         else ResolutionMethod.UNRESOLVED
     )
-    resolution_confidence = decision.confidence if resolved_entity_id is not None else None
-    candidate_entity_ids = _candidate_entity_ids(candidate_set)
-
-    existing_reference = (
-        reference_repo.get(existing_reference_id)
-        if existing_reference_id is not None and reference_repo is not None
+    resolution_confidence = (
+        decision.confidence
+        if resolved_entity_id is not None
         else None
     )
+    candidate_entity_ids = _candidate_entity_ids(candidate_set)
+
     reference_payload = {
         "reference_id": existing_reference_id or _new_reference_id(),
         "raw_mention_text": raw_mention_text,
@@ -465,6 +475,24 @@ def resolve_mention_with_repositories(
         resolution_method=resolution_method,
         resolution_confidence=resolution_confidence,
     )
+
+
+def _validate_existing_reference_for_resolution(
+    existing_reference: EntityReference,
+    raw_mention_text: str,
+) -> None:
+    if existing_reference.resolved_entity_id is not None:
+        raise ValueError(
+            "existing_reference_id must point to an unresolved reference",
+        )
+    if existing_reference.resolution_method is not ResolutionMethod.UNRESOLVED:
+        raise ValueError(
+            "existing_reference_id must point to an unresolved reference",
+        )
+    if existing_reference.raw_mention_text != raw_mention_text:
+        raise ValueError(
+            "existing_reference_id raw_mention_text does not match input",
+        )
 
 
 def _resolve_candidate_set_decision(
