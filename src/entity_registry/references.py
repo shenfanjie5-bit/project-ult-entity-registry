@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from entity_registry.contracts import current_canonical_id_rule_version
 from entity_registry.core import DecisionType, ResolutionMethod
 
 if TYPE_CHECKING:
@@ -31,6 +32,10 @@ class EntityReference(BaseModel):
     resolution_method: ResolutionMethod
     resolution_confidence: float | None
     created_at: datetime = Field(default_factory=_utcnow)
+    canonical_id_rule_version: str = Field(
+        default_factory=current_canonical_id_rule_version,
+        exclude=True,
+    )
 
     @model_validator(mode="after")
     def validate_resolution_state(self) -> EntityReference:
@@ -63,6 +68,10 @@ class ResolutionCase(BaseModel):
     decision_type: DecisionType
     decision_rationale: str
     created_at: datetime = Field(default_factory=_utcnow)
+    canonical_id_rule_version: str = Field(
+        default_factory=current_canonical_id_rule_version,
+        exclude=True,
+    )
 
 
 def register_unresolved_reference(

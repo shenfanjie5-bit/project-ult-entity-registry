@@ -8,6 +8,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from entity_registry.contracts import current_canonical_id_rule_version
+
 
 class EntityType(str, Enum):
     """Supported canonical entity categories."""
@@ -111,6 +113,10 @@ class CanonicalEntity(BaseModel):
     cross_listing_group: str | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+    canonical_id_rule_version: str = Field(
+        default_factory=current_canonical_id_rule_version,
+        exclude=True,
+    )
 
     @model_validator(mode="after")
     def validate_canonical_entity(self) -> CanonicalEntity:
@@ -136,6 +142,10 @@ class EntityAlias(BaseModel):
     source: str
     is_primary: bool
     created_at: datetime = Field(default_factory=_utcnow)
+    canonical_id_rule_version: str = Field(
+        default_factory=current_canonical_id_rule_version,
+        exclude=True,
+    )
 
     @field_validator("confidence")
     @classmethod
