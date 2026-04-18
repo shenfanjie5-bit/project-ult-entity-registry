@@ -1,5 +1,6 @@
 import inspect
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -245,6 +246,96 @@ def test_a_h_shared_short_name_returns_unresolved_with_candidate_case() -> None:
     }
     assert cases[0].selected_entity_id is None
     assert cases[0].decision_type is DecisionType.MANUAL_REVIEW
+
+
+def test_existing_reference_id_updates_only_matching_unresolved_reference() -> None:
+    entity_repo, alias_repo, reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+    existing = EntityReference(
+        reference_id="ref-existing",
+        raw_mention_text="贵州茅台",
+        source_context={"document_id": "doc-existing"},
+        resolved_entity_id=None,
+        resolution_method=ResolutionMethod.UNRESOLVED,
+        resolution_confidence=None,
+        created_at=datetime(2026, 4, 10, tzinfo=UTC),
+    )
+    reference_repo.save(existing)
+
+    result = resolve_mention_with_repositories(
+        "贵州茅台",
+        {"document_id": "doc-new"},
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+        existing_reference_id="ref-existing",
+    )
+
+    updated = reference_repo.get("ref-existing")
+    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert updated is not None
+    assert updated.created_at == existing.created_at
+    assert updated.source_context == {"document_id": "doc-new"}
+    assert case_repo.find_by_reference("ref-existing")[0].selected_entity_id == (
+        "ENT_STOCK_600519.SH"
+    )
+
+
+@pytest.mark.parametrize(
+    ("existing_reference", "raw_mention_text", "match"),
+    [
+        (None, "贵州茅台", "not found"),
+        (
+            EntityReference(
+                reference_id="ref-existing",
+                raw_mention_text="其他公司",
+                source_context={},
+                resolved_entity_id=None,
+                resolution_method=ResolutionMethod.UNRESOLVED,
+                resolution_confidence=None,
+            ),
+            "贵州茅台",
+            "raw_mention_text mismatch",
+        ),
+        (
+            EntityReference(
+                reference_id="ref-existing",
+                raw_mention_text="贵州茅台",
+                source_context={},
+                resolved_entity_id="ENT_STOCK_600519.SH",
+                resolution_method=ResolutionMethod.DETERMINISTIC,
+                resolution_confidence=1.0,
+            ),
+            "贵州茅台",
+            "unresolved reference",
+        ),
+    ],
+)
+def test_existing_reference_id_rejects_invalid_update_targets(
+    existing_reference: EntityReference | None,
+    raw_mention_text: str,
+    match: str,
+) -> None:
+    entity_repo, alias_repo, reference_repo, case_repo = (
+        initialized_resolution_repositories()
+    )
+    if existing_reference is not None:
+        reference_repo.save(existing_reference)
+
+    with pytest.raises(ValueError, match=match):
+        resolve_mention_with_repositories(
+            raw_mention_text,
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-existing",
+        )
+
+    assert case_repo.find_by_reference("ref-existing") == []
 
 
 def test_public_resolve_mention_uses_configured_default_repositories() -> None:

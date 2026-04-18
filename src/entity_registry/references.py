@@ -34,7 +34,6 @@ class EntityReference(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
     canonical_id_rule_version: str = Field(
         default_factory=current_canonical_id_rule_version,
-        exclude=True,
     )
 
     @model_validator(mode="after")
@@ -70,7 +69,6 @@ class ResolutionCase(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
     canonical_id_rule_version: str = Field(
         default_factory=current_canonical_id_rule_version,
-        exclude=True,
     )
 
 

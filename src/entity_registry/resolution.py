@@ -377,8 +377,8 @@ def resolve_mention(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
-        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
-        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
     )
 
@@ -396,11 +396,24 @@ def resolve_mention_with_repositories(
     ner_extractor: NERExtractor | None = None,
     reasoner_client: ReasonerRuntimeClient | None = None,
     existing_reference_id: str | None = None,
+    reference_id: str | None = None,
 ) -> MentionResolutionResult:
     """Resolve one mention using explicit repositories and write audit records."""
 
     if existing_reference_id is not None and not existing_reference_id.strip():
         raise ValueError("existing_reference_id must be a non-empty string")
+    if reference_id is not None and not reference_id.strip():
+        raise ValueError("reference_id must be a non-empty string")
+    if existing_reference_id is not None and reference_id is not None:
+        raise ValueError("existing_reference_id and reference_id are mutually exclusive")
+
+    existing_reference = _existing_reference_for_resolution(
+        existing_reference_id,
+        raw_mention_text,
+        reference_repo,
+    )
+    if reference_id is not None:
+        _validate_new_reference_id(reference_id, reference_repo)
 
     matcher = DeterministicMatcher(entity_repo, alias_repo)
     candidate_set = matcher.collect_candidates_with_fuzzy(
@@ -427,13 +440,9 @@ def resolve_mention_with_repositories(
     resolution_confidence = decision.confidence if resolved_entity_id is not None else None
     candidate_entity_ids = _candidate_entity_ids(candidate_set)
 
-    existing_reference = (
-        reference_repo.get(existing_reference_id)
-        if existing_reference_id is not None and reference_repo is not None
-        else None
-    )
+    target_reference_id = existing_reference_id or reference_id or _new_reference_id()
     reference_payload = {
-        "reference_id": existing_reference_id or _new_reference_id(),
+        "reference_id": target_reference_id,
         "raw_mention_text": raw_mention_text,
         "source_context": source_context,
         "resolved_entity_id": resolved_entity_id,
@@ -465,6 +474,67 @@ def resolve_mention_with_repositories(
         resolution_method=resolution_method,
         resolution_confidence=resolution_confidence,
     )
+
+
+def validate_existing_reference_for_update(
+    existing_reference: EntityReference | None,
+    *,
+    existing_reference_id: str,
+    raw_mention_text: str,
+) -> None:
+    """Validate that an existing reference can be overwritten by a resolver."""
+
+    if existing_reference is None:
+        raise ValueError(f"existing reference not found: {existing_reference_id}")
+    if existing_reference.resolved_entity_id is not None:
+        raise ValueError(
+            "existing_reference_id must point to an unresolved reference: "
+            f"{existing_reference_id}"
+        )
+    if existing_reference.resolution_method is not ResolutionMethod.UNRESOLVED:
+        raise ValueError(
+            "existing_reference_id must point to an unresolved reference: "
+            f"{existing_reference_id}"
+        )
+    if existing_reference.raw_mention_text != raw_mention_text:
+        raise ValueError(
+            "existing_reference_id raw_mention_text mismatch: "
+            f"{existing_reference_id}"
+        )
+
+
+def _existing_reference_for_resolution(
+    existing_reference_id: str | None,
+    raw_mention_text: str,
+    reference_repo: ReferenceRepository | None,
+) -> EntityReference | None:
+    if existing_reference_id is None:
+        return None
+    if reference_repo is None:
+        raise ValueError(
+            "existing_reference_id requires reference_repo validation",
+        )
+
+    existing_reference = reference_repo.get(existing_reference_id)
+    validate_existing_reference_for_update(
+        existing_reference,
+        existing_reference_id=existing_reference_id,
+        raw_mention_text=raw_mention_text,
+    )
+    return existing_reference
+
+
+def _validate_new_reference_id(
+    reference_id: str,
+    reference_repo: ReferenceRepository | None,
+) -> None:
+    if reference_repo is None:
+        return
+    if reference_repo.get(reference_id) is not None:
+        raise ValueError(
+            "reference_id already exists; use existing_reference_id for backfill: "
+            f"{reference_id}"
+        )
 
 
 def _resolve_candidate_set_decision(

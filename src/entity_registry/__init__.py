@@ -41,6 +41,7 @@ from entity_registry.batch import (
     BatchResolutionReport,
     batch_resolve_with_report,
     run_batch_resolution_job as _runtime_run_batch_resolution_job,
+    _validate_existing_reference_inputs,
 )
 from entity_registry.fuzzy import (
     FuzzyCandidate,
@@ -215,6 +216,10 @@ def resolve_mention(
             "case_repo=...) before using public resolution APIs, or use "
             "configure_default_in_memory_audit_repositories() for tests/local workflows",
         )
+    _validate_public_audit_repository_cohesion(
+        repository_context.reference_repo,
+        repository_context.case_repo,
+    )
 
     reference_id = _new_public_reference_id()
     result = _runtime_resolve_mention_with_repositories(
@@ -227,7 +232,7 @@ def resolve_mention(
         fuzzy_matcher=repository_context.fuzzy_matcher,
         ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
-        existing_reference_id=reference_id,
+        reference_id=reference_id,
     )
     return _contract_case_for_reference(
         reference_id,
@@ -259,8 +264,16 @@ def batch_resolve(
             "case_repo=...) before using public resolution APIs, or use "
             "configure_default_in_memory_audit_repositories() for tests/local workflows",
         )
+    _validate_public_audit_repository_cohesion(
+        repository_context.reference_repo,
+        repository_context.case_repo,
+    )
 
     normalized_inputs = _public_batch_inputs_with_reference_ids(references)
+    _validate_existing_reference_inputs(
+        normalized_inputs,
+        reference_repo=repository_context.reference_repo,
+    )
 
     def resolve_with_captured_context(
         raw_mention_text: str,
@@ -268,6 +281,16 @@ def batch_resolve(
         *,
         existing_reference_id: str | None = None,
     ) -> _RuntimeMentionResolutionResult:
+        target_reference_kwargs: dict[str, str] = {}
+        if existing_reference_id is not None:
+            existing_reference = repository_context.reference_repo.get(
+                existing_reference_id,
+            )
+            target_reference_kwargs = (
+                {"existing_reference_id": existing_reference_id}
+                if existing_reference is not None
+                else {"reference_id": existing_reference_id}
+            )
         return _runtime_resolve_mention_with_repositories(
             raw_mention_text,
             context,
@@ -278,7 +301,7 @@ def batch_resolve(
             fuzzy_matcher=repository_context.fuzzy_matcher,
             ner_extractor=repository_context.ner_extractor,
             reasoner_client=repository_context.reasoner_client,
-            existing_reference_id=existing_reference_id,
+            **target_reference_kwargs,
         )
 
     report = _runtime_run_batch_resolution_job(
@@ -462,6 +485,7 @@ def _save_public_resolution_audit(
     reference_repo: ReferenceRepository,
     case_repo: ResolutionCaseRepository,
 ) -> _RuntimeResolutionCase:
+    _validate_public_audit_repository_cohesion(reference_repo, case_repo)
     save_resolution = getattr(reference_repo, "save_resolution", None)
     if not callable(save_resolution):
         raise ResolutionAuditRepositoryRequiredError(
@@ -492,6 +516,22 @@ def _save_public_resolution_audit(
             f"resolution case {case.case_id}",
         )
     return persisted_case
+
+
+def _validate_public_audit_repository_cohesion(
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+) -> None:
+    for attribute_name in ("_case_repo", "case_repo", "resolution_case_repo"):
+        native_case_repo = getattr(reference_repo, attribute_name, None)
+        if native_case_repo is None:
+            continue
+        if native_case_repo is not case_repo:
+            raise ValueError(
+                "reference audit repository must write resolution cases to the "
+                "configured case_repo"
+            )
+        return
 
 
 def _restore_reference_after_audit_failure(

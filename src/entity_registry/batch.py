@@ -22,6 +22,7 @@ from entity_registry.references import EntityReference
 from entity_registry.resolution import (
     resolve_mention,
     resolve_mention_with_repositories,
+    validate_existing_reference_for_update,
 )
 from entity_registry.resolution_types import (
     BatchResolutionJob,
@@ -200,8 +201,19 @@ def run_batch_resolution_job(
 ) -> BatchResolutionReport:
     """Run one batch job by delegating every unique source reference to a resolver."""
 
-    active_resolver = resolver if resolver is not None else _resolve_mention_for_batch
     inputs = [_coerce_reference_input(reference) for reference in references]
+    _validate_effective_reference_ids(inputs)
+    if (
+        resolver is None
+        and resolve_mention is _DEFAULT_RESOLVE_MENTION
+        and _has_source_reference_ids(inputs)
+    ):
+        repository_context = _get_default_resolution_repository_context()
+        _validate_existing_reference_inputs(
+            inputs,
+            reference_repo=repository_context.reference_repo,
+        )
+    active_resolver = resolver if resolver is not None else _resolve_mention_for_batch
     job.reference_ids = _unique_ids([
         item.source_reference_id
         for item in inputs
@@ -264,6 +276,15 @@ def batch_resolve(
     """
 
     normalized_inputs = [_coerce_reference_input(reference) for reference in references]
+    if (
+        resolve_mention is _DEFAULT_RESOLVE_MENTION
+        and _has_source_reference_ids(normalized_inputs)
+    ):
+        repository_context = _get_default_resolution_repository_context()
+        _validate_existing_reference_inputs(
+            normalized_inputs,
+            reference_repo=repository_context.reference_repo,
+        )
     job = _new_batch_job(normalized_inputs)
     report = run_batch_resolution_job(job, normalized_inputs)
     _raise_for_report_errors(report)
@@ -293,6 +314,10 @@ def batch_resolve_with_report(
     normalized_inputs = _ensure_source_reference_ids(
         [_coerce_reference_input(reference) for reference in references],
         reference_ids=reference_ids,
+    )
+    _validate_existing_reference_inputs(
+        normalized_inputs,
+        reference_repo=repository_context.reference_repo,
     )
     job = _new_batch_job(normalized_inputs)
     report = run_batch_resolution_job(
@@ -383,6 +408,30 @@ def _validate_effective_reference_ids(inputs: Sequence[BatchReferenceInput]) -> 
         raise ValueError(
             "duplicate source_reference_id in batch inputs: "
             f"{item.source_reference_id}"
+        )
+
+
+def _has_source_reference_ids(inputs: Sequence[BatchReferenceInput]) -> bool:
+    return any(item.source_reference_id is not None for item in inputs)
+
+
+def _validate_existing_reference_inputs(
+    inputs: Sequence[BatchReferenceInput],
+    *,
+    reference_repo: ReferenceRepository,
+) -> None:
+    for item in inputs:
+        if item.source_reference_id is None:
+            continue
+
+        existing_reference = reference_repo.get(item.source_reference_id)
+        if existing_reference is None:
+            continue
+
+        validate_existing_reference_for_update(
+            existing_reference,
+            existing_reference_id=item.source_reference_id,
+            raw_mention_text=item.raw_mention_text,
         )
 
 
@@ -526,6 +575,12 @@ def _resolve_mention_for_batch(
         return resolve_mention(raw_mention_text, context)
 
     repository_context = _get_default_resolution_repository_context()
+    existing_reference = repository_context.reference_repo.get(existing_reference_id)
+    target_reference_kwargs = (
+        {"existing_reference_id": existing_reference_id}
+        if existing_reference is not None
+        else {"reference_id": existing_reference_id}
+    )
     return resolve_mention_with_repositories(
         raw_mention_text,
         context,
@@ -533,10 +588,10 @@ def _resolve_mention_for_batch(
         alias_repo=repository_context.alias_repo,
         reference_repo=repository_context.reference_repo,
         case_repo=repository_context.case_repo,
-        fuzzy_matcher=getattr(repository_context, "fuzzy_matcher", None),
-        ner_extractor=getattr(repository_context, "ner_extractor", None),
+        fuzzy_matcher=repository_context.fuzzy_matcher,
+        ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
-        existing_reference_id=existing_reference_id,
+        **target_reference_kwargs,
     )
 
 

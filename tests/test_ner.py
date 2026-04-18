@@ -5,7 +5,13 @@ from pydantic import ValidationError
 
 import entity_registry
 import entity_registry.ner as ner_module
-from entity_registry.ner import ExtractedMention, HanLPNERExtractor, NullNERExtractor
+from entity_registry.ner import (
+    DEFAULT_HANLP_LITE_NER_MODEL_NAME,
+    DEFAULT_HANLP_LITE_NER_TASK_NAME,
+    ExtractedMention,
+    HanLPNERExtractor,
+    NullNERExtractor,
+)
 
 
 def test_package_exports_ner_public_types() -> None:
@@ -78,3 +84,32 @@ def test_hanlp_extractor_normalizes_fake_hanlp_payload(
     assert mentions[0].entity_type == "ORG"
     assert mentions[0].confidence == 0.93
     assert mentions[1].start == 5
+
+
+def test_hanlp_extractor_defaults_to_lite_model_and_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_models: list[str] = []
+
+    def load(model_name: str):
+        loaded_models.append(model_name)
+        return lambda text: {DEFAULT_HANLP_LITE_NER_TASK_NAME: ["贵州茅台"]}
+
+    fake_hanlp = SimpleNamespace(
+        load=load,
+        pretrained=SimpleNamespace(
+            mtl=SimpleNamespace(
+                **{DEFAULT_HANLP_LITE_NER_MODEL_NAME: "hanlp-lite-model"}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        ner_module.importlib,
+        "import_module",
+        lambda name: fake_hanlp,
+    )
+
+    mentions = HanLPNERExtractor().extract_mentions("贵州茅台公告")
+
+    assert loaded_models == ["hanlp-lite-model"]
+    assert [mention.mention_text for mention in mentions] == ["贵州茅台"]

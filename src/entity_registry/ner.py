@@ -11,6 +11,10 @@ if TYPE_CHECKING:
     from entity_registry.resolution_types import ResolutionContext
 
 
+DEFAULT_HANLP_LITE_NER_MODEL_NAME = "CLOSE_TOK_POS_NER_SRL_DEP_SDP_CON_ELECTRA_SMALL_ZH"
+DEFAULT_HANLP_LITE_NER_TASK_NAME = "ner/msra"
+
+
 class ExtractedMention(BaseModel):
     """One entity mention extracted from free text."""
 
@@ -82,7 +86,7 @@ class HanLPNERExtractor:
         task_name: str | None = None,
     ) -> None:
         self._model_name = model_name
-        self._task_name = task_name
+        self._task_name = task_name or DEFAULT_HANLP_LITE_NER_TASK_NAME
         self._model: Any | None = None
 
     def extract_mentions(
@@ -124,11 +128,15 @@ class HanLPNERExtractor:
 
 def _default_hanlp_ner_model_name(hanlp: Any) -> str:
     pretrained = getattr(hanlp, "pretrained", None)
-    ner_models = getattr(pretrained, "ner", None)
-    model_name = getattr(ner_models, "MSRA_NER_BERT_BASE_ZH", None)
+    mtl_models = getattr(pretrained, "mtl", None)
+    model_name = getattr(
+        mtl_models,
+        DEFAULT_HANLP_LITE_NER_MODEL_NAME,
+        None,
+    )
     if isinstance(model_name, str):
         return model_name
-    return "MSRA_NER_BERT_BASE_ZH"
+    return DEFAULT_HANLP_LITE_NER_MODEL_NAME
 
 
 def _iter_ner_items(payload: Any, task_name: str | None) -> list[Any]:

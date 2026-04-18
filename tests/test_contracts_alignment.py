@@ -115,16 +115,20 @@ def test_entity_registry_reexports_contract_entity_schemas() -> None:
     assert registry_contracts.CanonicalEntity is contract_schemas.CanonicalEntity
     assert registry_contracts.EntityAlias is contract_schemas.EntityAlias
     assert registry_contracts.EntityReference is contract_schemas.EntityReference
-    assert registry_contracts.ResolutionCase is contract_schemas.ResolutionCase
+    assert registry_contracts.ResolutionCase is not contract_schemas.ResolutionCase
+    assert issubclass(
+        registry_contracts.ResolutionCase,
+        contract_schemas.ResolutionCase,
+    )
 
     assert entity_registry.CanonicalEntity is contract_schemas.CanonicalEntity
     assert entity_registry.EntityAlias is contract_schemas.EntityAlias
     assert entity_registry.EntityReference is contract_schemas.EntityReference
-    assert entity_registry.ResolutionCase is contract_schemas.ResolutionCase
+    assert entity_registry.ResolutionCase is registry_contracts.ResolutionCase
     assert entity_registry.ContractCanonicalEntity is contract_schemas.CanonicalEntity
     assert entity_registry.ContractEntityAlias is contract_schemas.EntityAlias
     assert entity_registry.ContractEntityReference is contract_schemas.EntityReference
-    assert entity_registry.ContractResolutionCase is contract_schemas.ResolutionCase
+    assert entity_registry.ContractResolutionCase is registry_contracts.ResolutionCase
     assert not hasattr(entity_registry, "CanonicalEntityProfile")
     assert not hasattr(entity_registry, "MentionResolutionResult")
 
@@ -154,14 +158,14 @@ def test_root_public_api_payloads_validate_against_contract_schemas() -> None:
         "贵州茅台",
         {"source": "contract-boundary-test"},
     )
-    contract_schemas.ResolutionCase.model_validate(
+    registry_contracts.ResolutionCase.model_validate(
         resolution_case.model_dump(mode="json"),
     )
 
     batch_cases = entity_registry.batch_resolve(["平安银行", "不存在公司"])
     assert len(batch_cases) == 2
     for batch_case in batch_cases:
-        contract_schemas.ResolutionCase.model_validate(
+        registry_contracts.ResolutionCase.model_validate(
             batch_case.model_dump(mode="json"),
         )
 
@@ -172,7 +176,7 @@ def test_root_public_api_payloads_validate_against_contract_schemas() -> None:
             "source_context": {"source": "contract-boundary-test"},
         }
     )
-    contract_schemas.ResolutionCase.model_validate(
+    registry_contracts.ResolutionCase.model_validate(
         unresolved_case.model_dump(mode="json"),
     )
 
@@ -245,9 +249,63 @@ def test_root_batch_resolve_uses_one_repository_context_for_audit_conversion() -
     assert batch_cases[0].resolution_case_id == persisted_cases[0].case_id
     assert batch_cases[0].resolved_entity is not None
     assert batch_cases[0].resolved_entity.entity_id == "ENT_STOCK_000001.SZ"
-    contract_schemas.ResolutionCase.model_validate(
+    registry_contracts.ResolutionCase.model_validate(
         batch_cases[0].model_dump(mode="json"),
     )
+
+
+def test_resolution_case_relaxation_does_not_patch_contracts_dependency() -> None:
+    assert contract_schemas.ResolutionCase is not registry_contracts.ResolutionCase
+
+    case = RuntimeResolutionCase(
+        case_id="case-local-unresolved",
+        reference_id="ref-local-unresolved",
+        candidate_entity_ids=[],
+        selected_entity_id=None,
+        decision_type=DecisionType.AUTO,
+        decision_rationale="no candidates",
+        created_at=NOW,
+    )
+    contract_case = registry_contracts.to_contract_resolution_case(
+        case,
+        input_alias="不存在公司",
+        candidate_entities=[],
+        decision=contract_schemas.EntityResolutionDecision.UNRESOLVED,
+    )
+    dumped = contract_case.model_dump(mode="json")
+
+    registry_contracts.ResolutionCase.model_validate(dumped)
+    with pytest.raises(ValueError):
+        contract_schemas.ResolutionCase.model_validate(dumped)
+
+
+def test_public_resolution_rejects_mismatched_native_audit_repositories() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+
+    hidden_case_repo = InMemoryResolutionCaseRepository()
+    configured_case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = InMemoryResolutionAuditReferenceRepository(hidden_case_repo)
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=configured_case_repo,
+    )
+
+    with pytest.raises(ValueError, match="configured case_repo"):
+        entity_registry.resolve_mention("贵州茅台")
+
+    assert reference_repo.find_unresolved() == []
+    assert hidden_case_repo._cases == {}
+    assert configured_case_repo._cases == {}
 
 
 def test_canonical_id_rule_version_tracks_entity_id_rule_not_package_release() -> None:
@@ -414,7 +472,7 @@ def test_no_candidate_unresolved_case_projects_to_contract_schema() -> None:
     assert dumped["candidate_entities"] == []
     assert "ENT_UNRESOLVED_NO_CANDIDATE" not in str(dumped)
 
-    reparsed = contract_schemas.ResolutionCase.model_validate(dumped)
+    reparsed = registry_contracts.ResolutionCase.model_validate(dumped)
     assert reparsed.candidate_entities == []
     assert reparsed.resolved_entity is None
 
