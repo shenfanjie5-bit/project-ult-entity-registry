@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Self
 
+import contracts.schemas as _contract_schemas
+import contracts.schemas.entities as _contract_entity_schemas
+from pydantic import model_validator
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
     CANONICAL_ID_RULE_VERSION,
@@ -13,16 +16,36 @@ from contracts.schemas import (
     EntityAlias,
     EntityReference,
     EntityResolutionDecision,
-    ResolutionCase,
+    ResolutionCase as _ContractResolutionCase,
 )
 
+
+class ResolutionCase(_ContractResolutionCase):
+    """Contract resolution case with explicit no-candidate unresolved support."""
+
+    candidate_entities: list[EntityReference]
+
+    @model_validator(mode="after")
+    def candidate_entities_required_unless_unresolved(self) -> Self:
+        if (
+            self.decision is not EntityResolutionDecision.UNRESOLVED
+            and not self.candidate_entities
+        ):
+            raise ValueError(
+                "contracts ResolutionCase requires candidate_entities unless "
+                "decision='unresolved'"
+            )
+        return self
+
+
+# Keep contract module imports aligned with the relaxed local boundary schema.
+_contract_schemas.ResolutionCase = ResolutionCase
+_contract_entity_schemas.ResolutionCase = ResolutionCase
 
 ContractCanonicalEntity = CanonicalEntity
 ContractEntityAlias = EntityAlias
 ContractEntityReference = EntityReference
 ContractResolutionCase = ResolutionCase
-_NO_CANDIDATE_ENTITY_ID = "ENT_UNRESOLVED_NO_CANDIDATE"
-_NO_CANDIDATE_ENTITY_TYPE = "unresolved"
 
 
 def current_canonical_id_rule_version() -> str:
@@ -166,13 +189,7 @@ def _contract_candidate_references(
         ]
 
     if decision is EntityResolutionDecision.UNRESOLVED:
-        return [
-            EntityReference(
-                entity_id=_NO_CANDIDATE_ENTITY_ID,
-                entity_type=_NO_CANDIDATE_ENTITY_TYPE,
-                canonical_id_rule_version=canonical_id_rule_version,
-            )
-        ]
+        return []
 
     raise ValueError(
         "contracts ResolutionCase requires candidate entities unless "
