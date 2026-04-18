@@ -78,8 +78,8 @@ def test_resolve_mention_public_signature_matches_contract() -> None:
 
 
 def test_package_exports_resolution_public_api() -> None:
-    assert entity_registry.resolve_mention is resolve_mention
-    assert entity_registry.MentionResolutionResult is MentionResolutionResult
+    assert entity_registry.resolve_mention is not resolve_mention
+    assert not hasattr(entity_registry, "MentionResolutionResult")
 
 
 def test_mention_resolution_result_json_shape_is_stable() -> None:
@@ -268,7 +268,8 @@ def test_public_resolve_mention_uses_configured_default_repositories() -> None:
     )
 
     references = saved_references(reference_repo)
-    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert result.resolved_entity is not None
+    assert result.resolved_entity.entity_id == "ENT_STOCK_600519.SH"
     assert len(references) == 1
     assert references[0].source_context["source_type"] == "announcement"
 

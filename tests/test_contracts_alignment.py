@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,15 +21,33 @@ from entity_registry.core import (
     EntityType,
     ResolutionMethod,
 )
+from entity_registry.init import (
+    FileStockBasicSnapshotReader,
+    initialize_from_stock_basic_into,
+)
 from entity_registry.references import (
     EntityReference as RuntimeEntityReference,
     ResolutionCase as RuntimeResolutionCase,
 )
 from entity_registry.resolution_types import MentionResolutionResult
+from entity_registry.storage import (
+    InMemoryAliasRepository,
+    InMemoryEntityRepository,
+    InMemoryResolutionAuditReferenceRepository,
+    InMemoryResolutionCaseRepository,
+)
 
 
 NOW = datetime(2026, 4, 15, tzinfo=UTC)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "stock_basic_sample.json"
+
+
+@pytest.fixture(autouse=True)
+def reset_public_repositories() -> Iterator[None]:
+    entity_registry.reset_default_repositories()
+    yield
+    entity_registry.reset_default_repositories()
 
 
 def test_installed_contracts_dependency_exports_canonical_id_rule_version(
@@ -98,10 +117,137 @@ def test_entity_registry_reexports_contract_entity_schemas() -> None:
     assert registry_contracts.EntityReference is contract_schemas.EntityReference
     assert registry_contracts.ResolutionCase is contract_schemas.ResolutionCase
 
+    assert entity_registry.CanonicalEntity is contract_schemas.CanonicalEntity
+    assert entity_registry.EntityAlias is contract_schemas.EntityAlias
+    assert entity_registry.EntityReference is contract_schemas.EntityReference
+    assert entity_registry.ResolutionCase is contract_schemas.ResolutionCase
     assert entity_registry.ContractCanonicalEntity is contract_schemas.CanonicalEntity
     assert entity_registry.ContractEntityAlias is contract_schemas.EntityAlias
     assert entity_registry.ContractEntityReference is contract_schemas.EntityReference
     assert entity_registry.ContractResolutionCase is contract_schemas.ResolutionCase
+    assert not hasattr(entity_registry, "CanonicalEntityProfile")
+    assert not hasattr(entity_registry, "MentionResolutionResult")
+
+
+def test_root_public_api_payloads_validate_against_contract_schemas() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+    entity_registry.configure_default_in_memory_audit_repositories(
+        entity_repo,
+        alias_repo,
+    )
+
+    alias_hit = entity_registry.lookup_alias("贵州茅台")
+    assert alias_hit is not None
+    contract_schemas.CanonicalEntity.model_validate(
+        alias_hit.model_dump(mode="json"),
+    )
+
+    resolution_case = entity_registry.resolve_mention(
+        "贵州茅台",
+        {"source": "contract-boundary-test"},
+    )
+    contract_schemas.ResolutionCase.model_validate(
+        resolution_case.model_dump(mode="json"),
+    )
+
+    batch_cases = entity_registry.batch_resolve(["平安银行", "不存在公司"])
+    assert len(batch_cases) == 2
+    for batch_case in batch_cases:
+        contract_schemas.ResolutionCase.model_validate(
+            batch_case.model_dump(mode="json"),
+        )
+
+    unresolved_case = entity_registry.register_unresolved_reference(
+        {
+            "reference_id": "ref-contract-boundary",
+            "raw_mention_text": "Unknown Corp",
+            "source_context": {"source": "contract-boundary-test"},
+        }
+    )
+    contract_schemas.ResolutionCase.model_validate(
+        unresolved_case.model_dump(mode="json"),
+    )
+
+    profile = entity_registry.get_entity_profile("ENT_STOCK_000001.SZ")
+    contract_schemas.CanonicalEntity.model_validate(
+        profile["canonical_entity"].model_dump(mode="json"),
+    )
+    for alias in profile["aliases"]:
+        contract_schemas.EntityAlias.model_validate(alias.model_dump(mode="json"))
+
+
+def test_root_batch_resolve_uses_one_repository_context_for_audit_conversion() -> None:
+    entity_repo_a = InMemoryEntityRepository()
+    alias_repo_a = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo_a,
+        alias_repo_a,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+
+    entity_repo_b = InMemoryEntityRepository()
+    alias_repo_b = InMemoryAliasRepository()
+    case_repo_a = InMemoryResolutionCaseRepository()
+    case_repo_b = InMemoryResolutionCaseRepository()
+    reference_repo_b = InMemoryResolutionAuditReferenceRepository(case_repo_b)
+    reconfigured = False
+
+    def switch_to_context_b() -> None:
+        nonlocal reconfigured
+        if reconfigured:
+            return
+        reconfigured = True
+        entity_registry.configure_default_repositories(
+            entity_repo_b,
+            alias_repo_b,
+            reference_repo=reference_repo_b,
+            case_repo=case_repo_b,
+        )
+
+    reference_repo_a = ReconfiguringAuditReferenceRepository(
+        case_repo_a,
+        switch_to_context_b,
+    )
+    entity_registry.configure_default_repositories(
+        entity_repo_a,
+        alias_repo_a,
+        reference_repo=reference_repo_a,
+        case_repo=case_repo_a,
+    )
+
+    batch_cases = entity_registry.batch_resolve(
+        [
+            {
+                "reference_id": "ref-root-batch-context-race",
+                "raw_mention_text": "平安银行",
+            }
+        ]
+    )
+
+    assert reconfigured is True
+    default_entity_repo, default_alias_repo = entity_registry.get_default_repositories()
+    assert default_entity_repo is entity_repo_b
+    assert default_alias_repo is alias_repo_b
+    assert case_repo_b.find_by_reference("ref-root-batch-context-race") == []
+
+    persisted_cases = case_repo_a.find_by_reference("ref-root-batch-context-race")
+    assert len(persisted_cases) == 1
+    assert batch_cases[0].resolution_case_id == persisted_cases[0].case_id
+    assert batch_cases[0].resolved_entity is not None
+    assert batch_cases[0].resolved_entity.entity_id == "ENT_STOCK_000001.SZ"
+    contract_schemas.ResolutionCase.model_validate(
+        batch_cases[0].model_dump(mode="json"),
+    )
 
 
 def test_canonical_id_rule_version_tracks_entity_id_rule_not_package_release() -> None:
@@ -360,3 +506,21 @@ def make_case() -> RuntimeResolutionCase:
         decision_rationale="unique deterministic match",
         created_at=NOW,
     )
+
+
+class ReconfiguringAuditReferenceRepository(InMemoryResolutionAuditReferenceRepository):
+    def __init__(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+        callback: Callable[[], None],
+    ) -> None:
+        super().__init__(case_repo)
+        self._callback = callback
+
+    def save_resolution(
+        self,
+        reference: RuntimeEntityReference,
+        case: RuntimeResolutionCase,
+    ) -> None:
+        super().save_resolution(reference, case)
+        self._callback()

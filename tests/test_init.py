@@ -207,7 +207,8 @@ def test_package_in_memory_audit_helper_configures_public_resolution() -> None:
     result = entity_registry.resolve_mention("贵州茅台")
     unresolved = reference_repo.find_unresolved()
 
-    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert result.resolved_entity is not None
+    assert result.resolved_entity.entity_id == "ENT_STOCK_600519.SH"
     assert unresolved == []
     assert len(case_repo.find_by_reference(next(iter(reference_repo._references)))) == 1
 
@@ -252,7 +253,7 @@ def test_public_initialize_from_stock_basic_returns_none_for_fixture_snapshot() 
     entity = entity_registry.lookup_alias("平安银行")
     assert entity is not None
     assert entity.canonical_entity_id == "ENT_STOCK_000001.SZ"
-    assert entity_repo.get("ENT_STOCK_000001.SZ") == entity
+    assert entity_repo.get("ENT_STOCK_000001.SZ") is not None
     assert alias_repo.find_by_entity("ENT_STOCK_000001.SZ")
 
 
