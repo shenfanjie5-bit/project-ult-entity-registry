@@ -4,6 +4,11 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from importlib.metadata import (
+    PackageNotFoundError,
+    distribution as package_distribution,
+    version as package_version,
+)
 from pathlib import Path
 
 import entity_registry
@@ -11,6 +16,7 @@ import entity_registry.contracts as registry_contracts
 import contracts.schemas as contract_schemas
 import pytest
 from contracts.core import __version__ as contracts_package_version
+from pydantic import ValidationError
 
 from entity_registry.core import (
     AliasType,
@@ -33,6 +39,7 @@ from entity_registry.resolution_types import MentionResolutionResult
 from entity_registry.storage import (
     InMemoryAliasRepository,
     InMemoryEntityRepository,
+    InMemoryReferenceRepository,
     InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
 )
@@ -40,6 +47,7 @@ from entity_registry.storage import (
 
 NOW = datetime(2026, 4, 15, tzinfo=UTC)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONTRACTS_SRC = PROJECT_ROOT.parent / "contracts" / "src"
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "stock_basic_sample.json"
 
 
@@ -53,6 +61,22 @@ def reset_public_repositories() -> Iterator[None]:
 def test_installed_contracts_dependency_exports_canonical_id_rule_version(
     tmp_path: Path,
 ) -> None:
+    try:
+        package_version("project-ult-contracts")
+        distribution_path = Path(
+            package_distribution("project-ult-contracts")._path,
+        ).resolve()
+    except PackageNotFoundError:
+        pytest.skip(
+            "project-ult-contracts is not installed; local tests use sibling "
+            "contracts/src fallback",
+        )
+    if distribution_path.is_relative_to(CONTRACTS_SRC.resolve()):
+        pytest.skip(
+            "project-ult-contracts metadata is from sibling contracts/src; "
+            "installed dependency check requires an importable package install",
+        )
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["ENTITY_REGISTRY_CONTRACTS_SRC"] = str(
@@ -281,6 +305,68 @@ def test_root_resolve_rejects_mismatched_native_audit_repository_before_write() 
     assert bound_case_repo._cases == {}
 
 
+def test_resolve_mention_rejects_hidden_native_audit_repo() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+    configured_case_repo = InMemoryResolutionCaseRepository()
+    hidden_case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = HiddenNativeAuditReferenceRepository(hidden_case_repo)
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=configured_case_repo,
+    )
+
+    with pytest.raises(
+        entity_registry.ResolutionAuditRepositoryRequiredError,
+        match="different case repository",
+    ):
+        entity_registry.resolve_mention("贵州茅台", None)
+
+    assert reference_repo._references == {}
+    assert configured_case_repo._cases == {}
+    assert hidden_case_repo._cases == {}
+
+
+def test_batch_resolve_rejects_hidden_native_audit_repo_before_write() -> None:
+    entity_repo = InMemoryEntityRepository()
+    alias_repo = InMemoryAliasRepository()
+    result = initialize_from_stock_basic_into(
+        str(FIXTURE_PATH),
+        entity_repo,
+        alias_repo,
+        stock_basic_reader=FileStockBasicSnapshotReader(),
+    )
+    assert result.errors == []
+    configured_case_repo = InMemoryResolutionCaseRepository()
+    hidden_case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = HiddenNativeAuditReferenceRepository(hidden_case_repo)
+    entity_registry.configure_default_repositories(
+        entity_repo,
+        alias_repo,
+        reference_repo=reference_repo,
+        case_repo=configured_case_repo,
+    )
+
+    with pytest.raises(
+        entity_registry.ResolutionAuditRepositoryRequiredError,
+        match="different case repository",
+    ):
+        entity_registry.batch_resolve(["贵州茅台"])
+
+    assert reference_repo._references == {}
+    assert configured_case_repo._cases == {}
+    assert hidden_case_repo._cases == {}
+
+
 def test_canonical_id_rule_version_tracks_entity_id_rule_not_package_release() -> None:
     entity = make_entity()
     alias = make_alias()
@@ -450,6 +536,67 @@ def test_no_candidate_unresolved_case_projects_to_contract_schema() -> None:
     assert reparsed.resolved_entity is None
 
 
+def test_resolution_case_shared_contract_compatibility_is_explicit() -> None:
+    entity = make_entity()
+    hk_entity = make_hk_entity()
+    matched_case = registry_contracts.to_contract_resolution_case(
+        make_case(),
+        input_alias="CATL",
+        candidate_entities=[entity],
+        decision=contract_schemas.EntityResolutionDecision.MATCHED,
+    )
+    ambiguous_case = registry_contracts.to_contract_resolution_case(
+        RuntimeResolutionCase(
+            case_id="case-ambiguous",
+            reference_id="ref-ambiguous",
+            candidate_entity_ids=[
+                "ENT_STOCK_03750.HK",
+                "ENT_STOCK_300750.SZ",
+            ],
+            selected_entity_id=None,
+            decision_type=DecisionType.MANUAL_REVIEW,
+            decision_rationale="ambiguous aliases",
+            created_at=NOW,
+        ),
+        input_alias="宁德时代",
+        candidate_entities=[hk_entity, entity],
+        decision=contract_schemas.EntityResolutionDecision.AMBIGUOUS,
+    )
+    no_candidate_case = registry_contracts.to_contract_resolution_case(
+        RuntimeResolutionCase(
+            case_id="case-no-candidate-shared",
+            reference_id="ref-no-candidate-shared",
+            candidate_entity_ids=[],
+            selected_entity_id=None,
+            decision_type=DecisionType.AUTO,
+            decision_rationale="no candidates found",
+            created_at=NOW,
+        ),
+        input_alias="不存在公司",
+        candidate_entities=[],
+        decision=contract_schemas.EntityResolutionDecision.UNRESOLVED,
+    )
+
+    contract_schemas.ResolutionCase.model_validate(
+        matched_case.model_dump(mode="json"),
+    )
+    contract_schemas.ResolutionCase.model_validate(
+        ambiguous_case.model_dump(mode="json"),
+    )
+
+    no_candidate_payload = no_candidate_case.model_dump(mode="json")
+    try:
+        contract_schemas.ResolutionCase.model_validate(no_candidate_payload)
+    except ValidationError:
+        registry_contracts.ContractResolutionCase.model_validate(no_candidate_payload)
+    else:
+        assert (
+            contract_schemas.ResolutionCase.model_validate(no_candidate_payload)
+            .candidate_entities
+            == []
+        )
+
+
 def test_mention_resolution_result_uses_stable_contract_shape() -> None:
     result = MentionResolutionResult(
         raw_mention_text="贵州茅台",
@@ -563,3 +710,37 @@ class ReconfiguringAuditReferenceRepository(InMemoryResolutionAuditReferenceRepo
     ) -> None:
         super().save_new_resolution(reference, case)
         self._callback()
+
+
+class HiddenNativeAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self, hidden_case_repo: InMemoryResolutionCaseRepository) -> None:
+        super().__init__()
+        self._hidden_case_repo = hidden_case_repo
+
+    def owned_case_repo(self) -> InMemoryResolutionCaseRepository:
+        return self._hidden_case_repo
+
+    def save_resolution(
+        self,
+        reference: RuntimeEntityReference,
+        case: RuntimeResolutionCase,
+    ) -> None:
+        self.save(reference)
+        self._hidden_case_repo.save(case)
+
+    def save_new_resolution(
+        self,
+        reference: RuntimeEntityReference,
+        case: RuntimeResolutionCase,
+    ) -> None:
+        with self._lock:
+            if reference.reference_id in self._references:
+                raise ValueError(
+                    f"new_reference_id already exists: {reference.reference_id}",
+                )
+            self._save_unchecked(reference)
+            try:
+                self._hidden_case_repo.save(case)
+            except Exception:
+                self._references.pop(reference.reference_id, None)
+                raise

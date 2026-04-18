@@ -833,6 +833,10 @@ def _validate_resolution_audit_repository_cohesion(
 
 
 def _bound_case_repository(reference_repo: ReferenceRepository) -> object | None:
+    owned_case_repo = getattr(reference_repo, "owned_case_repo", None)
+    if callable(owned_case_repo):
+        return owned_case_repo()
+
     for attribute in ("_case_repo", "case_repo"):
         value = getattr(reference_repo, attribute, None)
         if value is not None:

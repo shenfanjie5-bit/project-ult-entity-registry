@@ -168,6 +168,10 @@ def register_unresolved_reference(
             "registering unresolved references, or use "
             "configure_default_in_memory_audit_repositories() for tests/local workflows",
         )
+    _validate_public_resolution_audit_repository_cohesion(
+        repository_context.reference_repo,
+        repository_context.case_repo,
+    )
 
     unresolved_reference = _coerce_unresolved_reference(reference)
     case = _RuntimeResolutionCase(
@@ -216,6 +220,10 @@ def resolve_mention(
             "case_repo=...) before using public resolution APIs, or use "
             "configure_default_in_memory_audit_repositories() for tests/local workflows",
         )
+    _validate_public_resolution_audit_repository_cohesion(
+        repository_context.reference_repo,
+        repository_context.case_repo,
+    )
 
     reference_id = _new_public_reference_id()
     result = _runtime_resolve_mention_with_repositories(
@@ -260,8 +268,11 @@ def batch_resolve(
             "case_repo=...) before using public resolution APIs, or use "
             "configure_default_in_memory_audit_repositories() for tests/local workflows",
         )
-
     normalized_inputs = _public_batch_inputs_with_reference_ids(references)
+    _validate_public_resolution_audit_repository_cohesion(
+        repository_context.reference_repo,
+        repository_context.case_repo,
+    )
 
     def resolve_with_captured_context(
         raw_mention_text: str,
@@ -484,7 +495,7 @@ def _save_public_resolution_audit(
             "resolution audit writes require a native save_resolution(reference, case) "
             "unit of work; separate reference/case writes are not supported",
         )
-    _validate_resolution_audit_repository_cohesion(reference_repo, case_repo)
+    _validate_public_resolution_audit_repository_cohesion(reference_repo, case_repo)
 
     previous_reference = reference_repo.get(reference.reference_id)
     try:
@@ -509,6 +520,41 @@ def _save_public_resolution_audit(
             f"resolution case {case.case_id}",
         )
     return persisted_case
+
+
+def _validate_public_resolution_audit_repository_cohesion(
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+) -> None:
+    _validate_resolution_audit_repository_cohesion(reference_repo, case_repo)
+    save_resolution = getattr(reference_repo, "save_resolution", None)
+    save_new_resolution = getattr(reference_repo, "save_new_resolution", None)
+    if not callable(save_resolution) and not callable(save_new_resolution):
+        return
+
+    owned_case_repo = _public_owned_case_repository(reference_repo)
+    if owned_case_repo is case_repo:
+        return
+    if owned_case_repo is None:
+        raise ResolutionAuditRepositoryRequiredError(
+            "public resolution audit repositories must expose owned_case_repo() "
+            "matching the configured case_repo",
+        )
+    raise ResolutionAuditRepositoryRequiredError(
+        "reference_repo.save_resolution is bound to a different case repository",
+    )
+
+
+def _public_owned_case_repository(reference_repo: ReferenceRepository) -> object | None:
+    owned_case_repo = getattr(reference_repo, "owned_case_repo", None)
+    if callable(owned_case_repo):
+        return owned_case_repo()
+
+    for attribute in ("_case_repo", "case_repo"):
+        value = getattr(reference_repo, attribute, None)
+        if value is not None:
+            return value
+    return None
 
 
 def _restore_reference_after_audit_failure(

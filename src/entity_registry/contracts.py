@@ -8,8 +8,8 @@ from typing import Any, Self
 
 from pydantic import model_validator
 from contracts.core import ContractBaseModel
+import contracts.schemas as _contract_schemas
 from contracts.schemas import (
-    CANONICAL_ID_RULE_VERSION,
     CanonicalEntity,
     EntityAlias,
     EntityReference,
@@ -17,9 +17,15 @@ from contracts.schemas import (
     ResolutionCase as _ContractResolutionCase,
 )
 
+CANONICAL_ID_RULE_VERSION = getattr(
+    _contract_schemas,
+    "CANONICAL_ID_RULE_VERSION",
+    "entity-registry-canonical-id-v1",
+)
+
 
 class ResolutionCase(_ContractResolutionCase):
-    """Entity-registry boundary case with explicit no-candidate unresolved support."""
+    """Entity-registry-owned case schema with no-candidate unresolved support."""
 
     candidate_entities: list[EntityReference]
 

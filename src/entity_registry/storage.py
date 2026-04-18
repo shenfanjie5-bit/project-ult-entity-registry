@@ -263,6 +263,11 @@ class InMemoryResolutionAuditReferenceRepository(InMemoryReferenceRepository):
                 )
             self._save_resolution_unchecked(reference, case)
 
+    def owned_case_repo(self) -> "InMemoryResolutionCaseRepository":
+        """Return the case repository owned by this audit unit of work."""
+
+        return self._case_repo
+
     def _save_resolution_unchecked(
         self,
         reference: EntityReference,
