@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field, model_validator
 
+from entity_registry.contracts import ContractBaseModel
 from entity_registry.core import FinalStatus, ResolutionMethod
 from entity_registry.fuzzy import FuzzyCandidate
 
@@ -36,7 +37,7 @@ class ResolutionContext(BaseModel):
     timestamp: datetime = Field(default_factory=_utcnow)
 
 
-class MentionResolutionResult(BaseModel):
+class MentionResolutionResult(ContractBaseModel):
     """Stable public result shape for mention resolution."""
 
     raw_mention_text: str
