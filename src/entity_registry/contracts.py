@@ -6,6 +6,8 @@ import hashlib
 from collections.abc import Sequence
 from typing import Any
 
+from pydantic import ValidationError
+
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
     CanonicalEntity,
@@ -26,8 +28,6 @@ ContractEntityAlias = EntityAlias
 ContractEntityReference = EntityReference
 ContractResolutionCase = ResolutionCase
 CANONICAL_ID_RULE_VERSION = _CONTRACT_RULE_VERSION
-_NO_CANDIDATE_ENTITY_ID = "ENT_UNRESOLVED_NO_CANDIDATE"
-_NO_CANDIDATE_ENTITY_TYPE = "unresolved"
 
 
 def current_canonical_id_rule_version() -> str:
@@ -106,7 +106,6 @@ def to_contract_resolution_case(
     candidate_refs = _contract_candidate_references(
         candidate_entities,
         contract_decision,
-        canonical_id_rule_version,
     )
     selected_entity_id = case.selected_entity_id
     if contract_decision is EntityResolutionDecision.MATCHED:
@@ -130,16 +129,18 @@ def to_contract_resolution_case(
             )
         resolved_contract_entity = None
 
-    return ResolutionCase(
-        resolution_case_id=case.case_id,
-        input_alias=input_alias,
-        decision=contract_decision,
-        confidence=_case_confidence(contract_decision, confidence),
-        candidate_entities=candidate_refs,
-        evidence_refs=list(evidence_refs or [case.reference_id]),
-        resolved_at=case.created_at,
-        canonical_id_rule_version=canonical_id_rule_version,
-        resolved_entity=resolved_contract_entity,
+    return _build_resolution_case(
+        {
+            "resolution_case_id": case.case_id,
+            "input_alias": input_alias,
+            "decision": contract_decision,
+            "confidence": _case_confidence(contract_decision, confidence),
+            "candidate_entities": candidate_refs,
+            "evidence_refs": list(evidence_refs or [case.reference_id]),
+            "resolved_at": case.created_at,
+            "canonical_id_rule_version": canonical_id_rule_version,
+            "resolved_entity": resolved_contract_entity,
+        }
     )
 
 
@@ -162,7 +163,6 @@ def _contract_decision(
 def _contract_candidate_references(
     candidate_entities: Sequence[Any],
     decision: EntityResolutionDecision,
-    canonical_id_rule_version: str,
 ) -> list[EntityReference]:
     if candidate_entities:
         return [
@@ -171,17 +171,37 @@ def _contract_candidate_references(
         ]
 
     if decision is EntityResolutionDecision.UNRESOLVED:
-        return [
-            EntityReference(
-                entity_id=_NO_CANDIDATE_ENTITY_ID,
-                entity_type=_NO_CANDIDATE_ENTITY_TYPE,
-                canonical_id_rule_version=canonical_id_rule_version,
-            )
-        ]
+        return []
 
     raise ValueError(
         "contracts ResolutionCase requires candidate entities unless "
         "decision='unresolved'"
+    )
+
+
+def _build_resolution_case(payload: dict[str, Any]) -> ResolutionCase:
+    try:
+        return ResolutionCase(**payload)
+    except ValidationError as exc:
+        if not _is_legacy_no_candidate_schema_gap(payload, exc):
+            raise
+        return ResolutionCase.model_construct(**payload)
+
+
+def _is_legacy_no_candidate_schema_gap(
+    payload: dict[str, Any],
+    exc: ValidationError,
+) -> bool:
+    if payload["decision"] is not EntityResolutionDecision.UNRESOLVED:
+        return False
+    if payload["candidate_entities"]:
+        return False
+
+    errors = exc.errors()
+    return bool(errors) and all(
+        tuple(error.get("loc", ())) == ("candidate_entities",)
+        and error.get("type") == "too_short"
+        for error in errors
     )
 
 

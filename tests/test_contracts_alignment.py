@@ -195,13 +195,11 @@ def test_no_candidate_unresolved_case_projects_to_contract_schema() -> None:
 
     assert contract_case.decision is contract_schemas.EntityResolutionDecision.UNRESOLVED
     assert contract_case.resolved_entity is None
-    assert contract_case.candidate_entities == [
-        contract_schemas.EntityReference(
-            entity_id="ENT_UNRESOLVED_NO_CANDIDATE",
-            entity_type="unresolved",
-            canonical_id_rule_version=registry_contracts.CANONICAL_ID_RULE_VERSION,
-        )
-    ]
+    assert contract_case.candidate_entities == []
+
+    serialized = contract_case.model_dump(mode="json")
+    assert serialized["candidate_entities"] == []
+    assert "ENT_UNRESOLVED_NO_CANDIDATE" not in str(serialized)
 
 
 def test_mention_resolution_result_uses_stable_contract_shape() -> None:
