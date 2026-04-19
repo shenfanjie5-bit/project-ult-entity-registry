@@ -80,7 +80,7 @@ def version_tuple(value):
     return tuple(int(part) for part in match.groups())
 
 installed_version = importlib.metadata.version("project-ult-contracts")
-assert version_tuple(installed_version) >= (0, 1, 0)
+assert version_tuple(installed_version) >= (0, 1, 1)
 assert isinstance(contract_schemas.CANONICAL_ID_RULE_VERSION, str)
 assert contract_schemas.CANONICAL_ID_RULE_VERSION
 assert (
@@ -106,7 +106,7 @@ def test_project_requires_contracts_release_with_rule_version_export() -> None:
     dependencies = pyproject["project"]["dependencies"]
 
     assert any(
-        dependency == "project-ult-contracts>=0.1.0"
+        dependency == "project-ult-contracts>=0.1.1"
         for dependency in dependencies
     )
 
