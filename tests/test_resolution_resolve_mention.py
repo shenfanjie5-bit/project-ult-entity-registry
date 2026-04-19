@@ -326,7 +326,10 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
     entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
-    reference_repo = NativeResolutionAuditReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+    # Native save_resolution must persist into the configured case_repo so the
+    # runtime cohesion guard in _save_resolution_audit accepts the unit of work.
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo=case_repo)
 
     result = resolve_mention_with_repositories(
         "贵州茅台",
@@ -334,7 +337,7 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
         entity_repo=entity_repo,
         alias_repo=alias_repo,
         reference_repo=reference_repo,
-        case_repo=UnexpectedResolutionCaseRepository(),
+        case_repo=case_repo,
     )
 
     references = saved_references(reference_repo)
@@ -349,6 +352,37 @@ def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
 
     for forbidden in ("openai", "anthropic", "google.generativeai", "splink", "hanlp"):
         assert forbidden not in text
+
+
+def test_runtime_resolve_rejects_save_resolution_that_skips_case_repo() -> None:
+    """Cohesion check: native save_resolution must persist into case_repo.
+
+    Mirrors the cohesion guard in the public ``_save_public_resolution_audit``
+    path so PUBLIC and runtime resolution share the same audit invariants.
+    """
+
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    reference_repo = ReferenceOnlyAuditReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+
+    with pytest.raises(
+        ResolutionAuditRepositoryRequiredError,
+        match="did not persist the resolution case",
+    ):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+        )
+
+    # Reference write must be rolled back when the cohesion check fails.
+    assert saved_references(reference_repo) == []
+    assert case_repo.find_by_reference("any") == []
 
 
 def make_entity(entity_id: str) -> CanonicalEntity:
@@ -436,3 +470,21 @@ class NativeResolutionAuditReferenceRepository(InMemoryReferenceRepository):
         if self.case_repo is not None:
             self.case_repo.save(case)
         self.saved_cases.append(case)
+
+
+class ReferenceOnlyAuditReferenceRepository(InMemoryReferenceRepository):
+    """Native save_resolution that writes the reference but skips the case_repo.
+
+    This adapter passes the ``save_resolution`` boundary check yet violates the
+    cohesion contract that the case must be persisted into the configured
+    case_repo. Used in regression tests for the runtime cohesion guard.
+    """
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.save(reference)
+        # Intentionally do not write ``case`` anywhere — runtime cohesion
+        # check must catch the missing persistence and roll back.

@@ -732,13 +732,54 @@ def _save_resolution_audit(
     reference_repo: ReferenceRepository | None,
     case_repo: ResolutionCaseRepository | None,
 ) -> None:
-    if audit_repo is None:
-        if reference_repo is None or case_repo is None:
-            raise ResolutionAuditRepositoryRequiredError(
-                "resolution audit writes require audit_repo or reference_repo/case_repo"
-            )
-        audit_repo = _RepositoryResolutionAuditRepository(reference_repo, case_repo)
-    audit_repo.save_resolution(reference, case)
+    if audit_repo is not None:
+        # Caller-supplied audit_repo owns the unit of work; do not interpose
+        # cohesion checks against the separately-provided reference/case repos.
+        audit_repo.save_resolution(reference, case)
+        return
+
+    if reference_repo is None or case_repo is None:
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit writes require audit_repo or reference_repo/case_repo"
+        )
+
+    repository_audit = _RepositoryResolutionAuditRepository(reference_repo, case_repo)
+    previous_reference = reference_repo.get(reference.reference_id)
+    try:
+        repository_audit.save_resolution(reference, case)
+    except Exception:
+        _restore_reference_after_audit_failure(
+            reference_repo,
+            reference.reference_id,
+            previous_reference,
+        )
+        raise
+
+    # Cohesion guard: native save_resolution adapters must persist the case
+    # into the configured case_repo. Mirrors _save_public_resolution_audit so
+    # PUBLIC and runtime resolution share the same audit invariants.
+    if case_repo.get(case.case_id) is None:
+        _restore_reference_after_audit_failure(
+            reference_repo,
+            reference.reference_id,
+            previous_reference,
+        )
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit repository did not persist the resolution case "
+            f"{case.case_id} into the configured case_repo; save_resolution must "
+            "write to the same case_repo passed to resolve_mention_with_repositories",
+        )
+
+
+def _restore_reference_after_audit_failure(
+    reference_repo: ReferenceRepository,
+    reference_id: str,
+    previous_reference: EntityReference | None,
+) -> None:
+    if previous_reference is None:
+        reference_repo.delete(reference_id)
+        return
+    reference_repo.save(previous_reference)
 
 
 def _generate_fuzzy_candidates(
