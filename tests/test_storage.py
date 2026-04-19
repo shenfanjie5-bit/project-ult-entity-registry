@@ -336,6 +336,11 @@ def test_resolution_audit_reference_repository_protocol_is_usable_for_in_memory(
 
     assert repository.get("ref-1") == reference
     assert case_repo.get("case-1") == case
+    assert repository.owns_resolution_case_repository(case_repo) is True
+    assert (
+        repository.owns_resolution_case_repository(InMemoryResolutionCaseRepository())
+        is False
+    )
 
 
 def test_in_memory_resolution_audit_repository_stages_case_before_reference() -> None:

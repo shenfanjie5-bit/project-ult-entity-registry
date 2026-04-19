@@ -40,6 +40,7 @@ from entity_registry.resolution_types import (
 from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
+    ReadableResolutionAuditRepository,
     ReferenceRepository,
     ResolutionAuditReferenceRepository,
     ResolutionAuditRepository,
@@ -359,7 +360,12 @@ def resolve_mention_with_repositories(
     existing_reference_id: str | None = None,
     allow_new_reference_id: bool = False,
 ) -> MentionResolutionResult:
-    """Resolve one mention using explicit repositories and write audit records."""
+    """Resolve one mention using explicit repositories and write audit records.
+
+    When ``existing_reference_id`` is provided, validation reads from the same
+    audit boundary that will receive ``save_resolution``: ``audit_repo`` when
+    supplied, otherwise ``reference_repo``.
+    """
 
     if existing_reference_id is not None and not existing_reference_id.strip():
         raise ValueError("existing_reference_id must be a non-empty string")
@@ -713,16 +719,6 @@ def _save_resolution_audit(
     )
     audit_reference_repo.save_resolution(reference, case)
 
-    # Cohesion guard: native save_resolution adapters must persist the case
-    # into the configured case_repo. Mirrors _save_public_resolution_audit so
-    # PUBLIC and runtime resolution share the same audit invariants.
-    if case_repo.get(case.case_id) is None:
-        raise ResolutionAuditRepositoryRequiredError(
-            "resolution audit repository did not persist the resolution case "
-            f"{case.case_id} into the configured case_repo; save_resolution must "
-            "write to the same case_repo passed to resolve_mention_with_repositories",
-        )
-
 
 def _validate_repository_audit_cohesion(
     reference_repo: ReferenceRepository,
@@ -730,8 +726,8 @@ def _validate_repository_audit_cohesion(
 ) -> ResolutionAuditReferenceRepository:
     """Return the public audit UoW, rejecting split write repositories.
 
-    Cohesion is verified by saving through ``save_resolution`` and then reading
-    the case back through the supplied ``case_repo``. The guard intentionally
+    Cohesion is verified before mutation through the public
+    ``owns_resolution_case_repository`` preflight. The guard intentionally
     avoids inspecting adapter internals or requiring object identity with a
     private case repository attribute.
     """
@@ -741,6 +737,19 @@ def _validate_repository_audit_cohesion(
         raise ResolutionAuditRepositoryRequiredError(
             "resolution audit writes require a native save_resolution(reference, case) "
             "unit of work; separate reference/case writes are not supported",
+        )
+
+    owns_case_repo = getattr(reference_repo, "owns_resolution_case_repository", None)
+    if not callable(owns_case_repo):
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit writes require a native "
+            "owns_resolution_case_repository(case_repo) cohesion preflight",
+        )
+    if not owns_case_repo(case_repo):
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit repository does not own the configured case_repo; "
+            "save_resolution must write to the same case_repo passed to "
+            "resolve_mention_with_repositories",
         )
     return cast(ResolutionAuditReferenceRepository, reference_repo)
 
@@ -759,8 +768,9 @@ def _validate_existing_reference_for_update(
     get_reference = _reference_reader_for_update(reference_repo, audit_repo)
     if get_reference is None:
         raise ResolutionAuditRepositoryRequiredError(
-            "existing_reference_id requires a readable reference repository or "
-            "audit_repo.get(reference_id) before resolution writes",
+            "existing_reference_id requires the audit write boundary to expose "
+            "get(reference_id): audit_repo.get(...) when audit_repo is provided, "
+            "otherwise reference_repo.get(...)",
         )
 
     existing_reference = get_reference(existing_reference_id)
@@ -790,15 +800,15 @@ def _reference_reader_for_update(
     reference_repo: ReferenceRepository | None,
     audit_repo: ResolutionAuditRepository | None,
 ):
+    if audit_repo is not None:
+        get_reference = getattr(audit_repo, "get", None)
+        if callable(get_reference):
+            return cast(ReadableResolutionAuditRepository, audit_repo).get
+        return None
+
     if reference_repo is not None:
         return reference_repo.get
 
-    if audit_repo is None:
-        return None
-
-    get_reference = getattr(audit_repo, "get", None)
-    if callable(get_reference):
-        return get_reference
     return None
 
 

@@ -346,8 +346,6 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
         initialized_resolution_repositories()
     )
     case_repo = InMemoryResolutionCaseRepository()
-    # Native save_resolution must persist into the configured case_repo so the
-    # runtime cohesion guard in _save_resolution_audit accepts the unit of work.
     reference_repo = NativeResolutionAuditReferenceRepository(case_repo=case_repo)
 
     result = resolve_mention_with_repositories(
@@ -511,6 +509,33 @@ def test_existing_reference_id_with_audit_repo_only_uses_reader() -> None:
     assert audit_repo.cases[0].reference_id == "ref-readable"
 
 
+def test_existing_reference_id_reads_from_audit_write_boundary() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo=case_repo)
+    reference_repo_reference = make_reference("ref-shared-reader", "贵州茅台")
+    reference_repo.save(reference_repo_reference)
+    audit_repo = ReadableAuditRepository()
+
+    with pytest.raises(ValueError, match="was not found"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            audit_repo=audit_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-shared-reader",
+        )
+
+    assert reference_repo.get("ref-shared-reader") == reference_repo_reference
+    assert audit_repo.references_by_id == {}
+    assert audit_repo.cases == []
+
+
 def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
     text = Path("src/entity_registry/resolution.py").read_text(encoding="utf-8")
 
@@ -524,10 +549,12 @@ def test_runtime_resolve_rejects_audit_repo_that_hides_case_write() -> None:
     )
     reference_repo = ReferenceOnlyAuditReferenceRepository()
     case_repo = InMemoryResolutionCaseRepository()
+    original = make_reference("ref-orphan-risk", "贵州茅台")
+    reference_repo.save(original)
 
     with pytest.raises(
         ResolutionAuditRepositoryRequiredError,
-        match="did not persist the resolution case",
+        match="does not own the configured case_repo",
     ):
         resolve_mention_with_repositories(
             "贵州茅台",
@@ -536,9 +563,11 @@ def test_runtime_resolve_rejects_audit_repo_that_hides_case_write() -> None:
             alias_repo=alias_repo,
             reference_repo=reference_repo,
             case_repo=case_repo,
+            existing_reference_id=original.reference_id,
         )
 
-    assert case_repo.find_by_reference("any") == []
+    assert reference_repo.get(original.reference_id) == original
+    assert case_repo.find_by_reference(original.reference_id) == []
 
 
 def test_audit_failure_does_not_restore_over_interleaved_successful_resolution() -> None:
@@ -672,6 +701,12 @@ class NativeResolutionAuditReferenceRepository(InMemoryReferenceRepository):
             self.case_repo.save(case)
         self.saved_cases.append(case)
 
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return case_repo is self.case_repo
+
 
 class PublicContractAuditReferenceRepository(InMemoryReferenceRepository):
     def __init__(self, audit_backend: "CaseAuditBackend") -> None:
@@ -686,6 +721,12 @@ class PublicContractAuditReferenceRepository(InMemoryReferenceRepository):
         self.save(reference)
         self.audit_backend.save_case(case)
 
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return self.audit_backend.owns_resolution_case_repository(case_repo)
+
 
 class CaseAuditBackend:
     def __init__(self, case_repo: InMemoryResolutionCaseRepository) -> None:
@@ -693,6 +734,12 @@ class CaseAuditBackend:
 
     def save_case(self, case: entity_registry.ResolutionCase) -> None:
         self._target.save(case)
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return case_repo is self._target
 
 
 class WriteOnlyAuditRepository:
@@ -740,6 +787,12 @@ class ReferenceOnlyAuditReferenceRepository(InMemoryReferenceRepository):
     ) -> None:
         self.save(reference)
         # Intentionally do not write ``case`` anywhere.
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return False
 
 
 class InterleavingFailingAuditReferenceRepository(
