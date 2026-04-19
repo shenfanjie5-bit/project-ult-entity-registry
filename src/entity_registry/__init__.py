@@ -108,6 +108,7 @@ from entity_registry.review import (
 from entity_registry.resolution import (
     DeterministicMatcher,
     ResolutionAuditRepositoryRequiredError,
+    _validate_repository_audit_cohesion,
     resolve_mention_with_repositories as _runtime_resolve_mention_with_repositories,
 )
 from entity_registry.resolution_types import (
@@ -228,6 +229,7 @@ def resolve_mention(
         ner_extractor=repository_context.ner_extractor,
         reasoner_client=repository_context.reasoner_client,
         existing_reference_id=reference_id,
+        allow_new_reference_id=True,
     )
     return _contract_case_for_reference(
         reference_id,
@@ -279,6 +281,7 @@ def batch_resolve(
             ner_extractor=repository_context.ner_extractor,
             reasoner_client=repository_context.reasoner_client,
             existing_reference_id=existing_reference_id,
+            allow_new_reference_id=True,
         )
 
     report = _runtime_run_batch_resolution_job(
@@ -469,40 +472,16 @@ def _save_public_resolution_audit(
             "unit of work; separate reference/case writes are not supported",
         )
 
-    previous_reference = reference_repo.get(reference.reference_id)
-    try:
-        save_resolution(reference, case)
-    except Exception:
-        _restore_reference_after_audit_failure(
-            reference_repo,
-            reference.reference_id,
-            previous_reference,
-        )
-        raise
+    _validate_repository_audit_cohesion(reference_repo, case_repo)
+    save_resolution(reference, case)
 
     persisted_case = case_repo.get(case.case_id)
     if persisted_case is None:
-        _restore_reference_after_audit_failure(
-            reference_repo,
-            reference.reference_id,
-            previous_reference,
-        )
         raise RuntimeError(
             "resolution audit repository did not persist the unresolved "
             f"resolution case {case.case_id}",
         )
     return persisted_case
-
-
-def _restore_reference_after_audit_failure(
-    reference_repo: ReferenceRepository,
-    reference_id: str,
-    previous_reference: _RuntimeEntityReference | None,
-) -> None:
-    if previous_reference is None:
-        reference_repo.delete(reference_id)
-        return
-    reference_repo.save(previous_reference)
 
 
 def _new_public_reference_id() -> str:
