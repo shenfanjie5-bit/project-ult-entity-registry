@@ -22,3 +22,23 @@ jobs:
         run: pip install pytest
       - name: Tests
         run: python -m pytest
+
+  contracts-lower-bound-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install contracts lower bound
+        run: python -m pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@main"
+      - name: Install package without upgrading contracts
+        run: |
+          python -m pip install "pydantic>=2.0" "pytest>=8.0"
+          python -m pip install -e . --no-deps
+      - name: Lower-bound contracts import smoke test
+        env:
+          ENTITY_REGISTRY_CONTRACTS_LOWER_BOUND_SMOKE: "1"
+        run: >
+          python -m pytest tests/test_contracts_alignment.py
+          -q -k test_declared_contracts_lower_bound_install_smoke
