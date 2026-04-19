@@ -77,13 +77,22 @@ def test_declared_contracts_lower_bound_install_smoke(
     )
 
 
-def test_ci_pins_contracts_lower_bound_smoke_to_declared_release() -> None:
+def test_ci_pins_contracts_oldest_published_tag_smoke_to_pinned_release() -> None:
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text()
 
-    # contracts is not published to PyPI; smoke job installs from git URL
-    # @main (which always reflects the latest released version). The lower-bound
-    # promise is enforced by the pyproject pin + this CI smoke run.
-    assert "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@main" in workflow
+    # Iron rule #6: CI cross-repo git+URL must pin a release tag, never @main.
+    # contracts is not published to PyPI; the smoke job installs the OLDEST
+    # PUBLISHED git tag of project-ult-contracts (currently v0.1.2) — see the
+    # `contracts-oldest-published-tag-smoke` job comment in ci.yml for why
+    # v0.1.0/v0.1.1 are not used (they were never released as git tags).
+    assert (
+        "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2"
+        in workflow
+    )
+    assert "@main" not in workflow.split("contracts.git", 1)[1].split("\n", 1)[0], (
+        "iron rule #6 violation: contracts git+URL still pins @main somewhere"
+    )
+    assert "contracts-oldest-published-tag-smoke" in workflow
     assert CONTRACTS_LOWER_BOUND_SMOKE_ENV in workflow
     assert "test_declared_contracts_lower_bound_install_smoke" in workflow
 

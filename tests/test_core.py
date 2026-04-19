@@ -32,7 +32,7 @@ def make_stock_entity(entity_id: str = "ENT_STOCK_300750.SZ") -> CanonicalEntity
 
 
 def test_package_exports_version() -> None:
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.1.1"
 
 
 def test_entity_type_values() -> None:

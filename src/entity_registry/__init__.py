@@ -128,7 +128,7 @@ from entity_registry.storage import (
     ResolutionCaseRepository,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 CanonicalEntity = ContractCanonicalEntity
 EntityAlias = ContractEntityAlias

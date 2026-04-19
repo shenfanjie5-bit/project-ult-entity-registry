@@ -7,6 +7,13 @@ on:
     branches: [main]
 
 jobs:
+  # `ci` lane = the 5-lane template's `full(ci)` umbrella: installs every extra
+  # so the full pytest collection (incl. tests/regression which hard-imports
+  # audit_eval_fixtures per iron rule #1) actually runs. Per stage-2 plan
+  # 5-lane semantics: test-fast/smoke ([dev]) / contract ([dev,contracts-schemas])
+  # / regression ([dev,shared-fixtures]) / full(ci) ([dev,contracts-schemas,shared-fixtures]).
+  # contracts-schemas is via the entity-registry pyproject extra; shared-fixtures
+  # is via the audit-eval @ v0.2.1 git+URL pin (also iron rule #6 compliant).
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -14,31 +21,94 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install cross-project dep (contracts)
-        run: pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@main"
-      - name: Install
-        run: pip install -e ".[dev]"
-      - name: Install pytest if missing
-        run: pip install pytest
+      - name: Install (full(ci) lane — all extras: dev + contracts-schemas + shared-fixtures)
+        run: pip install -e ".[dev,contracts-schemas,shared-fixtures]"
       - name: Tests
         run: python -m pytest
 
-  contracts-lower-bound-smoke:
+  # Renamed from `contracts-lower-bound-smoke` to be honest about what we test:
+  # the OLDEST PUBLISHED git tag of project-ult-contracts (currently v0.1.2),
+  # NOT the declared lower-bound `>=0.1.1` from pyproject.toml. v0.1.0 / v0.1.1
+  # were never released as git tags, so there is no real lower-bound tag to
+  # install. If contracts ever publishes v0.1.1 or earlier, bump this pin.
+  # Iron rule #6 requires a pinned tag (not @main); this job complies.
+  contracts-oldest-published-tag-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install contracts lower bound
-        run: python -m pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@main"
+      - name: Install contracts oldest published tag (v0.1.2 — see job comment)
+        run: python -m pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2"
       - name: Install package without upgrading contracts
         run: |
           python -m pip install "pydantic>=2.0" "pytest>=8.0"
           python -m pip install -e . --no-deps
-      - name: Lower-bound contracts import smoke test
+      - name: Oldest-published-tag contracts import smoke test
         env:
           ENTITY_REGISTRY_CONTRACTS_LOWER_BOUND_SMOKE: "1"
         run: >
           python -m pytest tests/test_contracts_alignment.py
           -q -k test_declared_contracts_lower_bound_install_smoke
+
+  # Stage-2 plan canonical lanes:
+  # - test-fast and smoke install only [dev] (offline-first per
+  #   SUBPROJECT_TESTING_STANDARD.md §2.2). They still need contracts
+  #   for the entity_registry package to import; CI installs from the
+  #   pinned tag (iron rule #6).
+  # - regression installs [shared-fixtures] for real audit_eval_fixtures.
+  # - contract installs [contracts-schemas] for cross-repo alignment.
+  test-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cross-project dep (contracts pinned)
+        run: pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2"
+      - name: Install (offline-first dev only)
+        run: pip install -e ".[dev]"
+      - name: test-fast (unit + boundary)
+        run: make test-fast
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cross-project dep (contracts pinned)
+        run: pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2"
+      - name: Install (offline-first dev only)
+        run: pip install -e ".[dev]"
+      - name: smoke
+        run: make smoke
+
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (with cross-repo contracts-schemas extra)
+        run: pip install -e ".[dev,contracts-schemas]"
+      - name: contract (incl. cross-repo alignment)
+        run: make contract
+
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cross-project dep (contracts pinned)
+        run: pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2"
+      - name: Install (with shared-fixtures git extra)
+        run: pip install -e ".[dev,shared-fixtures]"
+      - name: regression (must really consume audit_eval_fixtures)
+        run: make regression

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-ult-entity-registry"
-version = "0.1.0"
-description = "Scaffold workspace for entity-registry."
+version = "0.1.1"
+description = "Canonical entity ID + alias resolution for project-ult (ENT_* IDs, A+H separation, unresolved-explicit)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,8 +14,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Pure-pip dev tools — offline-first per SUBPROJECT_TESTING_STANDARD.md §2.2.
 dev = [
     "pytest>=8.0",
+]
+# Cross-repo schema source-of-truth pin (iron rule #6 + main-core sub-rule).
+contracts-schemas = [
+    "project-ult-contracts @ git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2",
+]
+# Shared regression fixtures (iron rule #6).
+shared-fixtures = [
+    "project-ult-audit-eval @ git+https://github.com/shenfanjie5-bit/project-ult-audit-eval.git@v0.2.1",
 ]
 ner = [
     "hanlp>=2.1",

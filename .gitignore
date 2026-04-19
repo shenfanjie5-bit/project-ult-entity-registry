@@ -1,7 +1,8 @@
-.orchestrator/
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
-dist/
 build/
-*.egg
+dist/
+.venv/
+PROJECT_REPORT.md
