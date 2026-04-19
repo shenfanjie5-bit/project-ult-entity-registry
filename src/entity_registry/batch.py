@@ -537,6 +537,7 @@ def _resolve_mention_for_batch(
         ner_extractor=getattr(repository_context, "ner_extractor", None),
         reasoner_client=repository_context.reasoner_client,
         existing_reference_id=existing_reference_id,
+        allow_new_reference_id=True,
     )
 
 
