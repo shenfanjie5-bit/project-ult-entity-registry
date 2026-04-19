@@ -30,6 +30,7 @@ from entity_registry.storage import (
     InMemoryResolutionAuditReferenceRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
+    ResolutionAuditReferenceRepository,
     ReviewRepository,
     ResolutionCaseRepository,
 )
@@ -321,6 +322,25 @@ def test_in_memory_resolution_audit_reference_repository_saves_reference_and_cas
 
     assert repository.get("ref-1") == reference
     assert case_repo.get("case-1") == case
+
+
+def test_resolution_audit_reference_repository_protocol_is_usable_for_in_memory() -> None:
+    case_repo = InMemoryResolutionCaseRepository()
+    repository: ResolutionAuditReferenceRepository = (
+        InMemoryResolutionAuditReferenceRepository(case_repo)
+    )
+    reference = make_reference("ref-1", "ENT_STOCK_300750.SZ")
+    case = make_case("case-1", "ref-1", "ENT_STOCK_300750.SZ")
+
+    repository.save_resolution(reference, case)
+
+    assert repository.get("ref-1") == reference
+    assert case_repo.get("case-1") == case
+    assert repository.owns_resolution_case_repository(case_repo) is True
+    assert (
+        repository.owns_resolution_case_repository(InMemoryResolutionCaseRepository())
+        is False
+    )
 
 
 def test_in_memory_resolution_audit_repository_stages_case_before_reference() -> None:
