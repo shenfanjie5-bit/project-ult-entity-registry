@@ -122,6 +122,8 @@ from entity_registry.storage import (
     InMemoryReviewRepository,
     InMemoryResolutionCaseRepository,
     ReferenceRepository,
+    ResolutionAuditReferenceRepository,
+    ResolutionAuditRepository,
     ReviewRepository,
     ResolutionCaseRepository,
 )
@@ -541,6 +543,8 @@ __all__ = [
     "NullFuzzyMatcher",
     "NullNERExtractor",
     "ReasonerRuntimeClient",
+    "ResolutionAuditReferenceRepository",
+    "ResolutionAuditRepository",
     "RepositoryNotConfiguredError",
     "ResolutionAuditPayload",
     "ResolutionCase",

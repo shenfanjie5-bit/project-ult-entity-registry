@@ -62,6 +62,50 @@ class ReferenceRepository(Protocol):
     def find_unresolved(self) -> list[EntityReference]: ...
 
 
+class ResolutionAuditRepository(Protocol):
+    """Unit-of-work contract for atomic resolution audit writes.
+
+    Implementations must persist the reference and its resolution case together.
+    ``save_resolution`` is the only mutation boundary. Existing-reference
+    updates that need pre-write validation should use
+    ``ReadableResolutionAuditRepository`` so the read and write use the same
+    unit of work.
+    """
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None: ...
+
+
+class ReadableResolutionAuditRepository(ResolutionAuditRepository, Protocol):
+    """Resolution audit unit of work that can read references it owns."""
+
+    def get(self, reference_id: str) -> EntityReference | None: ...
+
+
+class ResolutionAuditReferenceRepository(ReferenceRepository, Protocol):
+    """Reference repository that also owns resolution audit writes.
+
+    ``owns_resolution_case_repository`` is a non-mutating cohesion preflight.
+    It must return true only when ``save_resolution(reference, case)`` will
+    persist the case through the supplied case repository in the same atomic
+    audit unit of work.
+    """
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None: ...
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: "ResolutionCaseRepository",
+    ) -> bool: ...
+
+
 class ResolutionCaseRepository(Protocol):
     """Storage contract for resolution audit cases."""
 
@@ -273,6 +317,12 @@ class InMemoryResolutionAuditReferenceRepository(InMemoryReferenceRepository):
                 else:
                     self._case_repo._cases.pop(case.case_id, None)
                 raise
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: "ResolutionCaseRepository",
+    ) -> bool:
+        return case_repo is self._case_repo
 
 
 class InMemoryResolutionCaseRepository:

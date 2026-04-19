@@ -346,8 +346,6 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
         initialized_resolution_repositories()
     )
     case_repo = InMemoryResolutionCaseRepository()
-    # Native save_resolution must persist into the configured case_repo so the
-    # runtime cohesion guard in _save_resolution_audit accepts the unit of work.
     reference_repo = NativeResolutionAuditReferenceRepository(case_repo=case_repo)
 
     result = resolve_mention_with_repositories(
@@ -364,6 +362,28 @@ def test_resolution_audit_uses_native_save_resolution_boundary() -> None:
     assert len(references) == 1
     assert len(reference_repo.saved_cases) == 1
     assert reference_repo.saved_cases[0].reference_id == references[0].reference_id
+
+
+def test_resolution_audit_accepts_public_uow_without_case_repo_attrs() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = PublicContractAuditReferenceRepository(CaseAuditBackend(case_repo))
+
+    result = resolve_mention_with_repositories(
+        "贵州茅台",
+        None,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        reference_repo=reference_repo,
+        case_repo=case_repo,
+    )
+
+    references = saved_references(reference_repo)
+    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert len(references) == 1
+    assert len(case_repo.find_by_reference(references[0].reference_id)) == 1
 
 
 def test_existing_reference_id_must_exist_before_resolution_write() -> None:
@@ -442,6 +462,80 @@ def test_existing_reference_id_must_match_raw_mention_before_resolution_write() 
     assert case_repo.find_by_reference("ref-mismatch") == []
 
 
+def test_existing_reference_id_with_audit_repo_only_requires_reader() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    audit_repo = WriteOnlyAuditRepository()
+
+    with pytest.raises(
+        ResolutionAuditRepositoryRequiredError,
+        match="existing_reference_id requires",
+    ):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            audit_repo=audit_repo,
+            existing_reference_id="ref-unreadable",
+        )
+
+    assert audit_repo.references == []
+    assert audit_repo.cases == []
+
+
+def test_existing_reference_id_with_audit_repo_only_uses_reader() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    audit_repo = ReadableAuditRepository()
+    existing = make_reference("ref-readable", "贵州茅台")
+    audit_repo.references_by_id[existing.reference_id] = existing
+
+    result = resolve_mention_with_repositories(
+        "贵州茅台",
+        None,
+        entity_repo=entity_repo,
+        alias_repo=alias_repo,
+        audit_repo=audit_repo,
+        existing_reference_id=existing.reference_id,
+    )
+
+    assert result.resolved_entity_id == "ENT_STOCK_600519.SH"
+    assert audit_repo.references_by_id["ref-readable"].resolved_entity_id == (
+        "ENT_STOCK_600519.SH"
+    )
+    assert audit_repo.cases[0].reference_id == "ref-readable"
+
+
+def test_existing_reference_id_reads_from_audit_write_boundary() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    case_repo = InMemoryResolutionCaseRepository()
+    reference_repo = NativeResolutionAuditReferenceRepository(case_repo=case_repo)
+    reference_repo_reference = make_reference("ref-shared-reader", "贵州茅台")
+    reference_repo.save(reference_repo_reference)
+    audit_repo = ReadableAuditRepository()
+
+    with pytest.raises(ValueError, match="was not found"):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            audit_repo=audit_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id="ref-shared-reader",
+        )
+
+    assert reference_repo.get("ref-shared-reader") == reference_repo_reference
+    assert audit_repo.references_by_id == {}
+    assert audit_repo.cases == []
+
+
 def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
     text = Path("src/entity_registry/resolution.py").read_text(encoding="utf-8")
 
@@ -449,22 +543,43 @@ def test_resolution_module_has_no_provider_or_later_stage_imports() -> None:
         assert forbidden not in text
 
 
-def test_runtime_resolve_rejects_hidden_native_audit_repo_before_save() -> None:
-    """Cohesion check: native save_resolution must expose its case_repo.
-
-    Mirrors the cohesion guard in the public ``_save_public_resolution_audit``
-    path so PUBLIC and runtime resolution share the same audit invariants.
-    """
-
+def test_runtime_resolve_rejects_audit_repo_that_hides_case_write() -> None:
     entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
     )
     reference_repo = ReferenceOnlyAuditReferenceRepository()
     case_repo = InMemoryResolutionCaseRepository()
+    original = make_reference("ref-orphan-risk", "贵州茅台")
+    reference_repo.save(original)
 
     with pytest.raises(
         ResolutionAuditRepositoryRequiredError,
-        match="must expose owned_case_repo",
+        match="does not own the configured case_repo",
+    ):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+            existing_reference_id=original.reference_id,
+        )
+
+    assert reference_repo.get(original.reference_id) == original
+    assert case_repo.find_by_reference(original.reference_id) == []
+
+
+def test_audit_cohesion_preflight_runs_before_save_resolution() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    reference_repo = MutatingCohesionRejectingAuditReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+
+    with pytest.raises(
+        ResolutionAuditRepositoryRequiredError,
+        match="does not own the configured case_repo",
     ):
         resolve_mention_with_repositories(
             "贵州茅台",
@@ -475,7 +590,7 @@ def test_runtime_resolve_rejects_hidden_native_audit_repo_before_save() -> None:
             case_repo=case_repo,
         )
 
-    # Hidden native audit repositories are rejected before any write.
+    assert reference_repo.save_resolution_calls == 0
     assert saved_references(reference_repo) == []
     assert case_repo.find_by_reference("any") == []
 
@@ -611,12 +726,83 @@ class NativeResolutionAuditReferenceRepository(InMemoryReferenceRepository):
             self.case_repo.save(case)
         self.saved_cases.append(case)
 
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return case_repo is self.case_repo
+
+
+class PublicContractAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self, audit_backend: "CaseAuditBackend") -> None:
+        super().__init__()
+        self.audit_backend = audit_backend
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.save(reference)
+        self.audit_backend.save_case(case)
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return self.audit_backend.owns_resolution_case_repository(case_repo)
+
+
+class CaseAuditBackend:
+    def __init__(self, case_repo: InMemoryResolutionCaseRepository) -> None:
+        self._target = case_repo
+
+    def save_case(self, case: entity_registry.ResolutionCase) -> None:
+        self._target.save(case)
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return case_repo is self._target
+
+
+class WriteOnlyAuditRepository:
+    def __init__(self) -> None:
+        self.references: list[EntityReference] = []
+        self.cases: list[entity_registry.ResolutionCase] = []
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.references.append(reference)
+        self.cases.append(case)
+
+
+class ReadableAuditRepository:
+    def __init__(self) -> None:
+        self.references_by_id: dict[str, EntityReference] = {}
+        self.cases: list[entity_registry.ResolutionCase] = []
+
+    def get(self, reference_id: str) -> EntityReference | None:
+        return self.references_by_id.get(reference_id)
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.references_by_id[reference.reference_id] = reference
+        self.cases.append(case)
+
 
 class ReferenceOnlyAuditReferenceRepository(InMemoryReferenceRepository):
     """Native save_resolution that writes the reference but skips the case_repo.
 
-    This adapter passes the ``save_resolution`` method check but hides the case
-    repository owner, so the runtime cohesion guard must reject it before save.
+    This adapter passes the ``save_resolution`` method check, but the case
+    readback guard rejects it because it never persists the resolution case.
     """
 
     def save_resolution(
@@ -626,6 +812,32 @@ class ReferenceOnlyAuditReferenceRepository(InMemoryReferenceRepository):
     ) -> None:
         self.save(reference)
         # Intentionally do not write ``case`` anywhere.
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return False
+
+
+class MutatingCohesionRejectingAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.save_resolution_calls = 0
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.save_resolution_calls += 1
+        self.save(reference)
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return False
 
 
 class InterleavingFailingAuditReferenceRepository(
