@@ -62,6 +62,31 @@ class ReferenceRepository(Protocol):
     def find_unresolved(self) -> list[EntityReference]: ...
 
 
+class ResolutionAuditRepository(Protocol):
+    """Unit-of-work contract for atomic resolution audit writes.
+
+    Implementations must persist the reference and its resolution case together.
+    When a caller also supplies a ``ResolutionCaseRepository`` for audit
+    readback, the saved case must be visible through that repository.
+    """
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None: ...
+
+
+class ResolutionAuditReferenceRepository(ReferenceRepository, Protocol):
+    """Reference repository that also owns resolution audit writes."""
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: ResolutionCase,
+    ) -> None: ...
+
+
 class ResolutionCaseRepository(Protocol):
     """Storage contract for resolution audit cases."""
 

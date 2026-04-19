@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Protocol
+from typing import cast
 
 from entity_registry.aliases import AliasManager, normalize_alias_text
 from entity_registry.core import (
@@ -41,58 +41,18 @@ from entity_registry.storage import (
     AliasRepository,
     EntityRepository,
     ReferenceRepository,
+    ResolutionAuditReferenceRepository,
+    ResolutionAuditRepository,
     ResolutionCaseRepository,
 )
 
 
 _LOGGER = logging.getLogger(__name__)
 _LLM_CONFIDENCE_THRESHOLD = 0.80
-_MISSING_CASE_REPO_OWNER = object()
-
-
-class ResolutionAuditRepository(Protocol):
-    """Unit-of-work contract for writing resolution audit records."""
-
-    def save_resolution(
-        self,
-        reference: EntityReference,
-        case: ResolutionCase,
-    ) -> None: ...
 
 
 class ResolutionAuditRepositoryRequiredError(RuntimeError):
     """Raised when resolution is asked to write audit records without a UoW."""
-
-
-class _RepositoryResolutionAuditRepository:
-    """Resolution audit unit of work over native repository contracts."""
-
-    def __init__(
-        self,
-        reference_repo: ReferenceRepository,
-        case_repo: ResolutionCaseRepository,
-    ) -> None:
-        self._reference_repo = reference_repo
-        self._case_repo = case_repo
-
-    def save_resolution(
-        self,
-        reference: EntityReference,
-        case: ResolutionCase,
-    ) -> None:
-        native_save_resolution = getattr(
-            self._reference_repo,
-            "save_resolution",
-            None,
-        )
-        if callable(native_save_resolution):
-            native_save_resolution(reference, case)
-            return
-
-        raise ResolutionAuditRepositoryRequiredError(
-            "resolution audit writes require a native save_resolution(reference, case) "
-            "unit of work; separate reference/case writes are not supported",
-        )
 
 
 class DeterministicMatcher:
@@ -407,6 +367,7 @@ def resolve_mention_with_repositories(
         existing_reference_id,
         raw_mention_text,
         reference_repo,
+        audit_repo=audit_repo,
         allow_new_reference_id=allow_new_reference_id,
     )
 
@@ -746,16 +707,11 @@ def _save_resolution_audit(
             "resolution audit writes require audit_repo or reference_repo/case_repo"
         )
 
-    native_save_resolution = getattr(reference_repo, "save_resolution", None)
-    if not callable(native_save_resolution):
-        raise ResolutionAuditRepositoryRequiredError(
-            "resolution audit writes require a native save_resolution(reference, case) "
-            "unit of work; separate reference/case writes are not supported",
-        )
-
-    _validate_repository_audit_cohesion(reference_repo, case_repo)
-    repository_audit = _RepositoryResolutionAuditRepository(reference_repo, case_repo)
-    repository_audit.save_resolution(reference, case)
+    audit_reference_repo = _validate_repository_audit_cohesion(
+        reference_repo,
+        case_repo,
+    )
+    audit_reference_repo.save_resolution(reference, case)
 
     # Cohesion guard: native save_resolution adapters must persist the case
     # into the configured case_repo. Mirrors _save_public_resolution_audit so
@@ -771,31 +727,22 @@ def _save_resolution_audit(
 def _validate_repository_audit_cohesion(
     reference_repo: ReferenceRepository,
     case_repo: ResolutionCaseRepository,
-) -> None:
-    owned_case_repo = _owned_case_repo(reference_repo)
-    if owned_case_repo is _MISSING_CASE_REPO_OWNER:
-        raise ResolutionAuditRepositoryRequiredError(
-            "resolution audit repository must expose owned_case_repo() returning "
-            "the configured case_repo before resolution writes",
-        )
-    if owned_case_repo is not case_repo:
-        raise ResolutionAuditRepositoryRequiredError(
-            "resolution audit repository owns a different case_repo than the "
-            "case_repo passed to resolve_mention_with_repositories",
-        )
+) -> ResolutionAuditReferenceRepository:
+    """Return the public audit UoW, rejecting split write repositories.
 
+    Cohesion is verified by saving through ``save_resolution`` and then reading
+    the case back through the supplied ``case_repo``. The guard intentionally
+    avoids inspecting adapter internals or requiring object identity with a
+    private case repository attribute.
+    """
 
-def _owned_case_repo(
-    reference_repo: ReferenceRepository,
-) -> ResolutionCaseRepository | object:
-    owned_case_repo = getattr(reference_repo, "owned_case_repo", None)
-    if callable(owned_case_repo):
-        return owned_case_repo()
-    if hasattr(reference_repo, "_case_repo"):
-        return getattr(reference_repo, "_case_repo")
-    if hasattr(reference_repo, "case_repo"):
-        return getattr(reference_repo, "case_repo")
-    return _MISSING_CASE_REPO_OWNER
+    save_resolution = getattr(reference_repo, "save_resolution", None)
+    if not callable(save_resolution):
+        raise ResolutionAuditRepositoryRequiredError(
+            "resolution audit writes require a native save_resolution(reference, case) "
+            "unit of work; separate reference/case writes are not supported",
+        )
+    return cast(ResolutionAuditReferenceRepository, reference_repo)
 
 
 def _validate_existing_reference_for_update(
@@ -803,12 +750,20 @@ def _validate_existing_reference_for_update(
     raw_mention_text: str,
     reference_repo: ReferenceRepository | None,
     *,
+    audit_repo: ResolutionAuditRepository | None = None,
     allow_new_reference_id: bool = False,
 ) -> EntityReference | None:
-    if existing_reference_id is None or reference_repo is None:
+    if existing_reference_id is None:
         return None
 
-    existing_reference = reference_repo.get(existing_reference_id)
+    get_reference = _reference_reader_for_update(reference_repo, audit_repo)
+    if get_reference is None:
+        raise ResolutionAuditRepositoryRequiredError(
+            "existing_reference_id requires a readable reference repository or "
+            "audit_repo.get(reference_id) before resolution writes",
+        )
+
+    existing_reference = get_reference(existing_reference_id)
     if existing_reference is None:
         if allow_new_reference_id:
             return None
@@ -829,6 +784,22 @@ def _validate_existing_reference_for_update(
             "existing_reference_id must refer to an unresolved reference",
         )
     return existing_reference
+
+
+def _reference_reader_for_update(
+    reference_repo: ReferenceRepository | None,
+    audit_repo: ResolutionAuditRepository | None,
+):
+    if reference_repo is not None:
+        return reference_repo.get
+
+    if audit_repo is None:
+        return None
+
+    get_reference = getattr(audit_repo, "get", None)
+    if callable(get_reference):
+        return get_reference
+    return None
 
 
 def _generate_fuzzy_candidates(
