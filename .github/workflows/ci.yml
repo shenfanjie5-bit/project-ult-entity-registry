@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install contracts lower bound
-        run: python -m pip install "project-ult-contracts==0.1.1"
+        run: python -m pip install "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@main"
       - name: Install package without upgrading contracts
         run: |
           python -m pip install "pydantic>=2.0" "pytest>=8.0"
