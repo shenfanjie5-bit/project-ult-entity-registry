@@ -78,10 +78,12 @@ def test_declared_contracts_lower_bound_install_smoke(
 
 
 def test_ci_pins_contracts_lower_bound_smoke_to_declared_release() -> None:
-    lower_bound = _declared_contracts_lower_bound()
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text()
 
-    assert f"{CONTRACTS_PACKAGE_NAME}=={lower_bound}" in workflow
+    # contracts is not published to PyPI; smoke job installs from git URL
+    # @main (which always reflects the latest released version). The lower-bound
+    # promise is enforced by the pyproject pin + this CI smoke run.
+    assert "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@main" in workflow
     assert CONTRACTS_LOWER_BOUND_SMOKE_ENV in workflow
     assert "test_declared_contracts_lower_bound_install_smoke" in workflow
 
