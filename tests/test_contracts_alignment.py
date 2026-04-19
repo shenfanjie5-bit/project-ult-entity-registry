@@ -41,6 +41,9 @@ from entity_registry.storage import (
 NOW = datetime(2026, 4, 15, tzinfo=UTC)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "stock_basic_sample.json"
+CONTRACTS_LOWER_BOUND_SMOKE_ENV = "ENTITY_REGISTRY_CONTRACTS_LOWER_BOUND_SMOKE"
+CONTRACTS_PACKAGE_NAME = "project-ult-contracts"
+CONTRACTS_RELEASE_WITH_RULE_VERSION = "0.1.1"
 
 
 @pytest.fixture(autouse=True)
@@ -53,12 +56,67 @@ def reset_public_repositories() -> Iterator[None]:
 def test_installed_contracts_dependency_exports_canonical_id_rule_version(
     tmp_path: Path,
 ) -> None:
+    _run_contracts_import_smoke(
+        tmp_path,
+        minimum_version=_declared_contracts_lower_bound(),
+    )
+
+
+def test_declared_contracts_lower_bound_install_smoke(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get(CONTRACTS_LOWER_BOUND_SMOKE_ENV) != "1":
+        pytest.skip(
+            f"set {CONTRACTS_LOWER_BOUND_SMOKE_ENV}=1 after installing "
+            "the declared contracts lower bound exactly"
+        )
+
+    _run_contracts_import_smoke(
+        tmp_path,
+        exact_version=_declared_contracts_lower_bound(),
+    )
+
+
+def test_ci_pins_contracts_lower_bound_smoke_to_declared_release() -> None:
+    lower_bound = _declared_contracts_lower_bound()
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert f"{CONTRACTS_PACKAGE_NAME}=={lower_bound}" in workflow
+    assert CONTRACTS_LOWER_BOUND_SMOKE_ENV in workflow
+    assert "test_declared_contracts_lower_bound_install_smoke" in workflow
+
+
+def test_project_requires_contracts_release_with_rule_version_export() -> None:
+    assert _declared_contracts_lower_bound() == CONTRACTS_RELEASE_WITH_RULE_VERSION
+
+
+def _declared_contracts_lower_bound() -> str:
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    dependencies = pyproject["project"]["dependencies"]
+    dependency_prefix = f"{CONTRACTS_PACKAGE_NAME}>="
+
+    for dependency in dependencies:
+        if dependency.startswith(dependency_prefix):
+            return dependency.removeprefix(dependency_prefix)
+
+    raise AssertionError(f"{dependency_prefix}<version> dependency is required")
+
+
+def _run_contracts_import_smoke(
+    tmp_path: Path,
+    *,
+    exact_version: str | None = None,
+    minimum_version: str | None = None,
+) -> None:
+    if (exact_version is None) == (minimum_version is None):
+        raise ValueError("set exactly one of exact_version or minimum_version")
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
     env["ENTITY_REGISTRY_CONTRACTS_SRC"] = str(
         (PROJECT_ROOT.parent / "contracts" / "src").resolve()
     )
-    script = """
+    script = f"""
 import importlib.metadata
 import os
 import re
@@ -76,11 +134,16 @@ import entity_registry.contracts as registry_contracts
 def version_tuple(value):
     match = re.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", value)
     if match is None:
-        raise AssertionError(f"unsupported contracts version: {value}")
+        raise AssertionError(f"unsupported contracts version: {{value}}")
     return tuple(int(part) for part in match.groups())
 
-installed_version = importlib.metadata.version("project-ult-contracts")
-assert version_tuple(installed_version) >= (0, 1, 1)
+exact_version = {exact_version!r}
+minimum_version = {minimum_version!r}
+installed_version = importlib.metadata.version({CONTRACTS_PACKAGE_NAME!r})
+if exact_version is not None:
+    assert installed_version == exact_version
+if minimum_version is not None:
+    assert version_tuple(installed_version) >= version_tuple(minimum_version)
 assert isinstance(contract_schemas.CANONICAL_ID_RULE_VERSION, str)
 assert contract_schemas.CANONICAL_ID_RULE_VERSION
 assert (
@@ -99,16 +162,6 @@ assert (
     )
 
     assert result.returncode == 0, result.stderr
-
-
-def test_project_requires_contracts_release_with_rule_version_export() -> None:
-    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
-    dependencies = pyproject["project"]["dependencies"]
-
-    assert any(
-        dependency == "project-ult-contracts>=0.1.1"
-        for dependency in dependencies
-    )
 
 
 def test_entity_registry_reexports_contract_entity_schemas() -> None:
