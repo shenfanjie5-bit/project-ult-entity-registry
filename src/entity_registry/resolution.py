@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import cast
+from collections.abc import Callable
+from typing import cast, overload
 
 from entity_registry.aliases import AliasManager, normalize_alias_text
 from entity_registry.core import (
@@ -345,6 +346,60 @@ def resolve_mention(
     )
 
 
+@overload
+def resolve_mention_with_repositories(
+    raw_mention_text: str,
+    context: ResolutionContext | dict[str, object] | None,
+    *,
+    entity_repo: EntityRepository,
+    alias_repo: AliasRepository,
+    audit_repo: ReadableResolutionAuditRepository,
+    reference_repo: ReferenceRepository | None = ...,
+    case_repo: ResolutionCaseRepository | None = ...,
+    fuzzy_matcher: FuzzyMatcher | None = ...,
+    ner_extractor: NERExtractor | None = ...,
+    reasoner_client: ReasonerRuntimeClient | None = ...,
+    existing_reference_id: str,
+    allow_new_reference_id: bool = ...,
+) -> MentionResolutionResult: ...
+
+
+@overload
+def resolve_mention_with_repositories(
+    raw_mention_text: str,
+    context: ResolutionContext | dict[str, object] | None,
+    *,
+    entity_repo: EntityRepository,
+    alias_repo: AliasRepository,
+    audit_repo: None = ...,
+    reference_repo: ReferenceRepository,
+    case_repo: ResolutionCaseRepository,
+    fuzzy_matcher: FuzzyMatcher | None = ...,
+    ner_extractor: NERExtractor | None = ...,
+    reasoner_client: ReasonerRuntimeClient | None = ...,
+    existing_reference_id: str,
+    allow_new_reference_id: bool = ...,
+) -> MentionResolutionResult: ...
+
+
+@overload
+def resolve_mention_with_repositories(
+    raw_mention_text: str,
+    context: ResolutionContext | dict[str, object] | None,
+    *,
+    entity_repo: EntityRepository,
+    alias_repo: AliasRepository,
+    audit_repo: ResolutionAuditRepository | None = ...,
+    reference_repo: ReferenceRepository | None = ...,
+    case_repo: ResolutionCaseRepository | None = ...,
+    fuzzy_matcher: FuzzyMatcher | None = ...,
+    ner_extractor: NERExtractor | None = ...,
+    reasoner_client: ReasonerRuntimeClient | None = ...,
+    existing_reference_id: None = ...,
+    allow_new_reference_id: bool = ...,
+) -> MentionResolutionResult: ...
+
+
 def resolve_mention_with_repositories(
     raw_mention_text: str,
     context: ResolutionContext | dict[str, object] | None,
@@ -363,8 +418,10 @@ def resolve_mention_with_repositories(
     """Resolve one mention using explicit repositories and write audit records.
 
     When ``existing_reference_id`` is provided, validation reads from the same
-    audit boundary that will receive ``save_resolution``: ``audit_repo`` when
-    supplied, otherwise ``reference_repo``.
+    audit boundary that will receive ``save_resolution``. Supplying
+    ``audit_repo`` for that path requires ``ReadableResolutionAuditRepository``;
+    otherwise the read comes from ``ReferenceRepository`` before the public
+    case-repository ownership preflight and before any mutation.
     """
 
     if existing_reference_id is not None and not existing_reference_id.strip():
@@ -799,7 +856,7 @@ def _validate_existing_reference_for_update(
 def _reference_reader_for_update(
     reference_repo: ReferenceRepository | None,
     audit_repo: ResolutionAuditRepository | None,
-):
+) -> Callable[[str], EntityReference | None] | None:
     if audit_repo is not None:
         get_reference = getattr(audit_repo, "get", None)
         if callable(get_reference):
@@ -907,6 +964,7 @@ def _source_context_from(
 
 __all__ = [
     "DeterministicMatcher",
+    "ReadableResolutionAuditRepository",
     "ResolutionAuditRepository",
     "ResolutionAuditRepositoryRequiredError",
     "resolve_mention",

@@ -570,6 +570,31 @@ def test_runtime_resolve_rejects_audit_repo_that_hides_case_write() -> None:
     assert case_repo.find_by_reference(original.reference_id) == []
 
 
+def test_audit_cohesion_preflight_runs_before_save_resolution() -> None:
+    entity_repo, alias_repo, _reference_repo, _case_repo = (
+        initialized_resolution_repositories()
+    )
+    reference_repo = MutatingCohesionRejectingAuditReferenceRepository()
+    case_repo = InMemoryResolutionCaseRepository()
+
+    with pytest.raises(
+        ResolutionAuditRepositoryRequiredError,
+        match="does not own the configured case_repo",
+    ):
+        resolve_mention_with_repositories(
+            "贵州茅台",
+            None,
+            entity_repo=entity_repo,
+            alias_repo=alias_repo,
+            reference_repo=reference_repo,
+            case_repo=case_repo,
+        )
+
+    assert reference_repo.save_resolution_calls == 0
+    assert saved_references(reference_repo) == []
+    assert case_repo.find_by_reference("any") == []
+
+
 def test_audit_failure_does_not_restore_over_interleaved_successful_resolution() -> None:
     entity_repo, alias_repo, _reference_repo, _case_repo = (
         initialized_resolution_repositories()
@@ -787,6 +812,26 @@ class ReferenceOnlyAuditReferenceRepository(InMemoryReferenceRepository):
     ) -> None:
         self.save(reference)
         # Intentionally do not write ``case`` anywhere.
+
+    def owns_resolution_case_repository(
+        self,
+        case_repo: InMemoryResolutionCaseRepository,
+    ) -> bool:
+        return False
+
+
+class MutatingCohesionRejectingAuditReferenceRepository(InMemoryReferenceRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.save_resolution_calls = 0
+
+    def save_resolution(
+        self,
+        reference: EntityReference,
+        case: entity_registry.ResolutionCase,
+    ) -> None:
+        self.save_resolution_calls += 1
+        self.save(reference)
 
     def owns_resolution_case_repository(
         self,
