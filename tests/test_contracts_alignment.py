@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -44,6 +45,12 @@ FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "stock_basic_sample.json"
 CONTRACTS_LOWER_BOUND_SMOKE_ENV = "ENTITY_REGISTRY_CONTRACTS_LOWER_BOUND_SMOKE"
 CONTRACTS_PACKAGE_NAME = "project-ult-contracts"
 CONTRACTS_RELEASE_WITH_RULE_VERSION = "0.1.1"
+# CI's contracts-oldest-published-tag-smoke job installs the OLDEST PUBLISHED
+# git tag (currently v0.1.2). The DECLARED floor in pyproject is `>=0.1.1`,
+# but v0.1.0 / v0.1.1 were never released as git tags, so the smoke can only
+# install v0.1.2. Keep this constant in sync with the workflow's pinned tag —
+# both are validated by `test_ci_pins_contracts_oldest_published_tag_smoke_to_pinned_release`.
+CONTRACTS_OLDEST_PUBLISHED_TAG = "0.1.2"
 
 
 @pytest.fixture(autouse=True)
@@ -65,16 +72,47 @@ def test_installed_contracts_dependency_exports_canonical_id_rule_version(
 def test_declared_contracts_lower_bound_install_smoke(
     tmp_path: Path,
 ) -> None:
+    """CI smoke job installs the OLDEST PUBLISHED contracts git tag and
+    runs this test with the env var set. The job (renamed from
+    `contracts-lower-bound-smoke` to `contracts-oldest-published-tag-smoke`,
+    see ci.yml comment) pins `@v0.1.2` because v0.1.0 / v0.1.1 are not real
+    git tags. This test therefore asserts:
+
+    1. installed contracts == CONTRACTS_OLDEST_PUBLISHED_TAG (the actually
+       pinned tag — keeps the test honest if the workflow's pin drifts);
+    2. installed version still meets the pyproject declared floor
+       `>=0.1.1` (so we never accidentally pin BELOW the declared minimum);
+    3. CANONICAL_ID_RULE_VERSION is exported (the original purpose).
+
+    Test name is preserved for CI workflow `-k` selector compatibility.
+    """
     if os.environ.get(CONTRACTS_LOWER_BOUND_SMOKE_ENV) != "1":
         pytest.skip(
             f"set {CONTRACTS_LOWER_BOUND_SMOKE_ENV}=1 after installing "
-            "the declared contracts lower bound exactly"
+            "the contracts oldest-published-tag exactly"
         )
+
+    declared_floor = _declared_contracts_lower_bound()
+    assert _version_tuple(CONTRACTS_OLDEST_PUBLISHED_TAG) >= _version_tuple(
+        declared_floor
+    ), (
+        f"CONTRACTS_OLDEST_PUBLISHED_TAG ({CONTRACTS_OLDEST_PUBLISHED_TAG}) is "
+        f"BELOW the declared pyproject floor ({declared_floor}); the smoke "
+        "lane would silently certify a too-old release. Bump the constant or "
+        "fix pyproject."
+    )
 
     _run_contracts_import_smoke(
         tmp_path,
-        exact_version=_declared_contracts_lower_bound(),
+        exact_version=CONTRACTS_OLDEST_PUBLISHED_TAG,
     )
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", value)
+    if match is None:
+        raise AssertionError(f"unsupported version string: {value!r}")
+    return tuple(int(part) for part in match.groups())
 
 
 def test_ci_pins_contracts_oldest_published_tag_smoke_to_pinned_release() -> None:
@@ -85,13 +123,45 @@ def test_ci_pins_contracts_oldest_published_tag_smoke_to_pinned_release() -> Non
     # PUBLISHED git tag of project-ult-contracts (currently v0.1.2) — see the
     # `contracts-oldest-published-tag-smoke` job comment in ci.yml for why
     # v0.1.0/v0.1.1 are not used (they were never released as git tags).
-    assert (
-        "git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2"
-        in workflow
+
+    # Find EVERY `contracts.git@<ref>` occurrence in the workflow (across all
+    # jobs / lanes) so a future job can't silently regress to @main without
+    # this test catching it. Match the whole ref token until whitespace or a
+    # closing quote — covers both `"git+...contracts.git@v0.1.2"` quoted and
+    # bare `git+...contracts.git@v0.1.2` forms.
+    pin_pattern = re.compile(
+        r"project-ult-contracts\.git@(?P<ref>[^\s\"']+)"
     )
-    assert "@main" not in workflow.split("contracts.git", 1)[1].split("\n", 1)[0], (
-        "iron rule #6 violation: contracts git+URL still pins @main somewhere"
+    matches = pin_pattern.findall(workflow)
+    assert matches, (
+        "no `project-ult-contracts.git@<ref>` pins found in ci.yml; either "
+        "ci.yml stopped installing contracts at all, or this regex needs a "
+        "follow-up to match the new install style."
     )
+
+    bad_pins = [
+        ref
+        for ref in matches
+        # Branch refs (anything that isn't a vMAJOR.MINOR.PATCH or full SHA)
+        # would constitute a rule #6 violation. Today the only forbidden
+        # ref we've actually seen drift to is `main`, but be a bit broader:
+        # anything that doesn't look like a release tag (`v\d+\.\d+\.\d+`)
+        # or a 40-char SHA also fails.
+        if not re.fullmatch(r"v\d+\.\d+\.\d+|[0-9a-f]{40}", ref)
+    ]
+    assert not bad_pins, (
+        f"iron rule #6 violation: contracts git+URL pin(s) not on a "
+        f"release tag / full SHA: {bad_pins}; all {len(matches)} pin(s) "
+        f"in ci.yml were: {matches}"
+    )
+
+    # Spot-check the specific pin we expect today; if v0.1.2 is rolled, this
+    # assertion plus CONTRACTS_OLDEST_PUBLISHED_TAG must move together.
+    assert all(ref == f"v{CONTRACTS_OLDEST_PUBLISHED_TAG}" for ref in matches), (
+        f"expected every contracts pin to be v{CONTRACTS_OLDEST_PUBLISHED_TAG} "
+        f"(matching CONTRACTS_OLDEST_PUBLISHED_TAG); got {matches}"
+    )
+
     assert "contracts-oldest-published-tag-smoke" in workflow
     assert CONTRACTS_LOWER_BOUND_SMOKE_ENV in workflow
     assert "test_declared_contracts_lower_bound_install_smoke" in workflow
