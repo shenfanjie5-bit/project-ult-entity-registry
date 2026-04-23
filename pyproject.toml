@@ -24,7 +24,7 @@ contracts-schemas = [
 ]
 # Shared regression fixtures (iron rule #6).
 shared-fixtures = [
-    "project-ult-audit-eval @ git+https://github.com/shenfanjie5-bit/project-ult-audit-eval.git@v0.2.3",
+    "project-ult-audit-eval @ git+https://github.com/shenfanjie5-bit/project-ult-audit-eval.git@v0.2.4",
 ]
 ner = [
     "hanlp>=2.1",

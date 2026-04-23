@@ -57,8 +57,8 @@ class TestRuntimeAliasResolutionAgainstFixture:
     """**Real-runtime regression** (iron rule #5).
 
     For ``case_fuzzy_alias_simple``: the fixture provides an alias
-    table containing "宁德" → ENT_STOCK_300750_SZ; the expected
-    resolved_entity_id is ENT_STOCK_300750_SZ. We instantiate an
+    table containing "宁德" → ENT_STOCK_300750.SZ; the expected
+    resolved_entity_id is ENT_STOCK_300750.SZ. We instantiate an
     in-memory entity + alias repository from the fixture's
     ``alias_table_snapshot``, call the runtime
     ``lookup_alias_in_repositories``, and assert the resolved entity's
@@ -88,7 +88,7 @@ class TestRuntimeAliasResolutionAgainstFixture:
         alias_repo = InMemoryAliasRepository()
 
         # The fixture's alias_table_snapshot lists multiple aliases
-        # for ENT_STOCK_300750_SZ; we need at least one entity record.
+        # for ENT_STOCK_300750.SZ; we need at least one entity record.
         catl = CanonicalEntity(
             canonical_entity_id=expected_id,
             entity_type=EntityType.STOCK,

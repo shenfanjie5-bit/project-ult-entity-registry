@@ -42,7 +42,7 @@
 | 术语 | 定义 | 备注 |
 |------|------|------|
 | Canonical Entity | 系统级正式实体对象 | 以 `canonical_entity_id` 唯一标识 |
-| Canonical Entity ID | 实体正式 ID | 如 `ENT_STOCK_300750_SZ` |
+| Canonical Entity ID | 实体正式 ID | 如 `ENT_STOCK_300750.SZ` |
 | Entity Alias | canonical entity 的别名映射 | 如简称、全称、英文名、代码、曾用名 |
 | Entity Reference | 一次原始引用记录 | 包含 raw mention、上下文、解析结果 |
 | Resolution Case | 一次消歧决策记录 | 包含候选集合、最终选择、理由 |
@@ -256,7 +256,7 @@ unresolved references
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| canonical_entity_id | String | 如 `ENT_STOCK_300750_SZ` |
+| canonical_entity_id | String | 如 `ENT_STOCK_300750.SZ` |
 | entity_type | String | `stock` / `corp` / `person` / `org` / `index` |
 | display_name | String | 正式展示名 |
 | status | String | `active` / `inactive` / `merged` |

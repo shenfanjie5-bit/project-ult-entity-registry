@@ -39,7 +39,7 @@ PM 职责：确保任何 Issue 都不越过以下边界。
 
 | 实体类型 | ID 格式 | 示例 |
 |----------|---------|------|
-| A 股上市公司 | `ENT_STOCK_{ts_code}` | `ENT_STOCK_300750_SZ` |
+| A 股上市公司 | `ENT_STOCK_{ts_code}` | `ENT_STOCK_300750.SZ` |
 | 非上市实体 | 自增 ID（规则由 `contracts` 定义） | — |
 
 **A+H 双上市**：两个交易所各自独立 canonical ID，通过 `cross_listing_group` 字段关联，绝不合并。

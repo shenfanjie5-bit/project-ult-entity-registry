@@ -65,7 +65,7 @@ get_entity_profile(canonical_entity_id) -> CanonicalEntityProfile
 
 ```python
 # 上市公司（来自 stock_basic）
-canonical_entity_id = f"ENT_STOCK_{ts_code}"   # 示例: ENT_STOCK_300750_SZ
+canonical_entity_id = f"ENT_STOCK_{ts_code}"   # 示例: ENT_STOCK_300750.SZ
 
 # A+H 双上市：各交易所各自独立 ID，cross_listing_group 做关联
 # 非上市实体：自增规则由 contracts 定义，实现前必须读 contracts

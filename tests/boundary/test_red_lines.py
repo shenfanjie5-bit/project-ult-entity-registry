@@ -41,7 +41,7 @@ class TestAHDualListingNotMerged:
         from datetime import UTC, datetime
 
         a_share = CanonicalEntity(
-            canonical_entity_id="ENT_STOCK_300750_SZ",
+            canonical_entity_id="ENT_STOCK_300750.SZ",
             entity_type=EntityType.STOCK,
             display_name="宁德时代-A",
             status=EntityStatus.ACTIVE,
@@ -51,7 +51,7 @@ class TestAHDualListingNotMerged:
             updated_at=datetime.now(UTC),
         )
         h_share = CanonicalEntity(
-            canonical_entity_id="ENT_STOCK_03750_HK",
+            canonical_entity_id="ENT_STOCK_03750.HK",
             entity_type=EntityType.STOCK,
             display_name="宁德时代-H",
             status=EntityStatus.ACTIVE,
