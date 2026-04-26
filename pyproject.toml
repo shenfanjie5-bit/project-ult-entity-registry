@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.0",
-    "project-ult-contracts>=0.1.1",
+    "project-ult-contracts>=0.1.3",
 ]
 
 [project.optional-dependencies]
@@ -20,7 +20,7 @@ dev = [
 ]
 # Cross-repo schema source-of-truth pin (iron rule #6 + main-core sub-rule).
 contracts-schemas = [
-    "project-ult-contracts @ git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.2",
+    "project-ult-contracts @ git+https://github.com/shenfanjie5-bit/project-ult-contracts.git@v0.1.3",
 ]
 # Shared regression fixtures (iron rule #6).
 shared-fixtures = [

@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from typing import Any, Self
+from typing import Any
 
-import contracts.schemas as _contract_schemas
-import contracts.schemas.entities as _contract_entity_schemas
-from pydantic import model_validator
 from contracts.core import ContractBaseModel
 from contracts.schemas import (
     CANONICAL_ID_RULE_VERSION,
@@ -16,31 +13,8 @@ from contracts.schemas import (
     EntityAlias,
     EntityReference,
     EntityResolutionDecision,
-    ResolutionCase as _ContractResolutionCase,
+    ResolutionCase,
 )
-
-
-class ResolutionCase(_ContractResolutionCase):
-    """Contract resolution case with explicit no-candidate unresolved support."""
-
-    candidate_entities: list[EntityReference]
-
-    @model_validator(mode="after")
-    def candidate_entities_required_unless_unresolved(self) -> Self:
-        if (
-            self.decision is not EntityResolutionDecision.UNRESOLVED
-            and not self.candidate_entities
-        ):
-            raise ValueError(
-                "contracts ResolutionCase requires candidate_entities unless "
-                "decision='unresolved'"
-            )
-        return self
-
-
-# Keep contract module imports aligned with the relaxed local boundary schema.
-_contract_schemas.ResolutionCase = ResolutionCase
-_contract_entity_schemas.ResolutionCase = ResolutionCase
 
 ContractCanonicalEntity = CanonicalEntity
 ContractEntityAlias = EntityAlias
