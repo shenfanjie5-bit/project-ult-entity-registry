@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from uuid import uuid4
 
 from entity_registry.core import (
@@ -143,6 +143,21 @@ def lookup_alias(alias_text: str) -> ContractCanonicalEntity | None:
     if entity is None:
         return None
     return to_contract_canonical_entity(entity)
+
+
+def lookup_entity_refs(refs: Iterable[str]) -> dict[str, bool]:
+    """Return existence for canonical entity references against live repositories.
+
+    This read-only helper is intentionally narrower than alias resolution: SDK
+    preflight should verify producer-supplied canonical refs, not mint or infer
+    new canonical IDs on behalf of subsystems.
+    """
+
+    entity_repo = get_default_entity_repository()
+    result: dict[str, bool] = {}
+    for ref in refs:
+        result[ref] = validate_entity_id(ref) and entity_repo.exists(ref)
+    return result
 
 
 def register_unresolved_reference(
@@ -583,6 +598,7 @@ __all__ = [
     "initialize_from_stock_basic_into",
     "load_stock_basic_records",
     "lookup_alias",
+    "lookup_entity_refs",
     "register_unresolved_reference",
     "reset_default_repositories",
     "resolve_mention",
