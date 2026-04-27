@@ -13,6 +13,7 @@ from entity_registry.core import (
     EntityType,
     FinalStatus,
     ResolutionMethod,
+    generate_event_entity_id,
     generate_stock_entity_id,
     validate_entity_id,
 )
@@ -42,6 +43,7 @@ def test_entity_type_values() -> None:
         "person",
         "org",
         "index",
+        "event",
     }
 
 
@@ -165,6 +167,25 @@ def test_generate_stock_entity_id_rejects_empty_input() -> None:
 def test_generate_stock_entity_id_rejects_invalid_input() -> None:
     with pytest.raises(ValueError):
         generate_stock_entity_id("300750 SZ")
+
+
+def test_generate_event_entity_id_is_deterministic_and_namespaced() -> None:
+    first = generate_event_entity_id("controlled-news", "article-1#fact-1")
+    second = generate_event_entity_id("controlled news", "article-1#fact-1")
+
+    assert first == second
+    assert first.startswith("ENT_EVENT_CONTROLLED_NEWS_")
+    assert validate_entity_id(first) is True
+
+
+def test_event_entity_requires_anchor_code() -> None:
+    with pytest.raises(ValidationError):
+        CanonicalEntity(
+            canonical_entity_id=generate_event_entity_id("news", "article-1#fact-1"),
+            entity_type=EntityType.EVENT,
+            display_name="Controlled event",
+            status=EntityStatus.ACTIVE,
+        )
 
 
 def test_validate_entity_id_accepts_stock_id() -> None:

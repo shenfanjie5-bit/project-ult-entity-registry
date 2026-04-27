@@ -12,9 +12,11 @@ from entity_registry.core import (
     EntityType,
     FinalStatus,
     ResolutionMethod,
+    generate_event_entity_id,
     generate_stock_entity_id,
     validate_entity_id,
 )
+from entity_registry.events import anchor_event_entity
 from entity_registry.aliases import (
     AliasManager,
     generate_aliases_from_stock_basic,
@@ -587,6 +589,8 @@ __all__ = [
     "enqueue_batch_manual_review",
     "enqueue_unresolved_reference",
     "generate_aliases_from_stock_basic",
+    "anchor_event_entity",
+    "generate_event_entity_id",
     "generate_stock_entity_id",
     "get_default_alias_repository",
     "get_default_entity_repository",

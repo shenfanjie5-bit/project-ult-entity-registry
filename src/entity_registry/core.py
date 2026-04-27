@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import UTC, datetime
 from enum import Enum
@@ -19,6 +20,7 @@ class EntityType(str, Enum):
     PERSON = "person"
     ORG = "org"
     INDEX = "index"
+    EVENT = "event"
 
 
 class EntityStatus(str, Enum):
@@ -89,6 +91,35 @@ def generate_stock_entity_id(ts_code: str) -> str:
     return f"ENT_STOCK_{normalized_ts_code}"
 
 
+def generate_event_entity_id(namespace: str, event_key: str) -> str:
+    """Generate a deterministic canonical ID for an anchored event node."""
+
+    normalized_namespace = _normalize_event_id_part(namespace, field_name="namespace")
+    normalized_event_key = _normalize_event_anchor_part(event_key, field_name="event_key")
+    digest = hashlib.sha256(
+        f"{normalized_namespace}\x1f{normalized_event_key}".encode("utf-8")
+    ).hexdigest()[:16].upper()
+    return f"ENT_EVENT_{normalized_namespace}_{digest}"
+
+
+def _normalize_event_id_part(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", value.strip().upper()).strip("_")
+    if not normalized:
+        raise ValueError(f"{field_name} must not be empty")
+    return normalized
+
+
+def _normalize_event_anchor_part(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        raise ValueError(f"{field_name} must not be empty")
+    return normalized
+
+
 def validate_entity_id(entity_id: str) -> bool:
     """Return whether a canonical entity ID follows the ENT_* namespace format."""
 
@@ -128,6 +159,12 @@ class CanonicalEntity(BaseModel):
 
         if self.canonical_entity_id.startswith("ENT_STOCK_") and self.anchor_code is None:
             raise ValueError("anchor_code is required for ENT_STOCK_* IDs")
+
+        if self.entity_type is EntityType.EVENT and self.anchor_code is None:
+            raise ValueError("anchor_code is required for event entities")
+
+        if self.canonical_entity_id.startswith("ENT_EVENT_") and self.anchor_code is None:
+            raise ValueError("anchor_code is required for ENT_EVENT_* IDs")
 
         return self
 
